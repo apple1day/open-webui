@@ -3,7 +3,14 @@ import { browser, dev } from '$app/environment';
 
 export const APP_NAME = 'Open WebUI';
 
-export const WEBUI_HOSTNAME = browser ? (dev ? `${location.hostname}:8080` : ``) : '';
+// dev 模式下后端端口：优先读取启动脚本注入的 VITE_BACKEND_PORT，缺省回退 8080
+const DEV_BACKEND_PORT =
+	(typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_PORT) || '8080';
+export const WEBUI_HOSTNAME = browser
+	? dev
+		? `${location.hostname}:${DEV_BACKEND_PORT}`
+		: ``
+	: '';
 export const WEBUI_BASE_URL = browser ? (dev ? `http://${WEBUI_HOSTNAME}` : ``) : ``;
 export const WEBUI_API_BASE_URL = `${WEBUI_BASE_URL}/api/v1`;
 
