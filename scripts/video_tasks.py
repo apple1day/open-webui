@@ -32,6 +32,12 @@ import urllib.request
 from datetime import datetime
 from typing import Optional
 
+# macOS 上 cv2 与 faster-whisper 依赖的 av(PyAV) 各自携带一套 libav，
+# 会触发 "Class AVFFrameReceiver is implemented in both ..." 重复加载告警，
+# 极端情况下可能导致神秘崩溃。必须在导入 cv2 / av 之前设置以下环境变量。
+os.environ.setdefault('OBJC_DISABLE_INITIALIZE_FORK_SAFETY', 'YES')
+os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+
 # OpenCV 是唯一的第三方依赖；缺失时给出清晰提示。
 try:
     import cv2  # type: ignore
@@ -90,8 +96,14 @@ def probe_metadata(path: str) -> dict:
 
 # --------------------------------------------------------------------------- #
 # 2) 抽帧（OpenCV）
+# sample_mode:
+#   'count'    固定张数：全片均匀抽 max_frames 帧（无视 frame_interval）
+#   'interval' 时间跨度：每 frame_interval 秒抽 1 帧（长视频更完整，受硬上限保护）
+#   'auto'     兼容旧行为：≤ max_frames 帧，且不密于 frame_interval
 # --------------------------------------------------------------------------- #
-def extract_frames(path: str, frame_interval: float, max_frames: int) -> list[tuple[float, str]]:
+def extract_frames(
+    path: str, frame_interval: float, max_frames: int, sample_mode: str = 'auto'
+) -> list[tuple[float, str]]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError('无法打开视频用于抽帧')
@@ -101,14 +113,28 @@ def extract_frames(path: str, frame_interval: float, max_frames: int) -> list[tu
     duration = (total_frames / fps) if fps > 0 else 0.0
 
     if duration > 0:
-        interval = max(frame_interval, duration / max_frames)
+        if sample_mode == 'count':
+            limit = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
+            step = duration / limit
+        elif sample_mode == 'interval':
+            step = max(0.5, frame_interval)
+            limit = int(duration // step) + 1
+            if limit > MAX_FRAMES_HARD_CAP:  # 太长则退化为均匀铺满上限
+                limit = MAX_FRAMES_HARD_CAP
+                step = duration / limit
+        else:  # auto
+            limit = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
+            step = max(frame_interval, duration / limit)
+
         timestamps, t = [], 0.0
-        while t < duration and len(timestamps) < max_frames:
+        while t < duration and len(timestamps) < limit:
             timestamps.append(t)
-            t += interval
+            t += step
     else:
-        step = max(1, (total_frames or max_frames) // max_frames)
-        timestamps = [float(i) for i in range(0, total_frames or max_frames, step)][:max_frames]
+        # 时长未知：按帧索引兜底
+        limit = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
+        step = max(1, (total_frames or limit) // limit)
+        timestamps = [float(i) for i in range(0, total_frames or limit, step)][:limit]
 
     out: list[tuple[float, str]] = []
     for ts in timestamps:
@@ -257,6 +283,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     language = task.get('language', defaults.get('language', 'zh'))
     interval = float(task.get('frame_interval', DEFAULT_FRAME_INTERVAL))
     max_frames = int(task.get('max_frames', DEFAULT_MAX_FRAMES))
+    sample_mode = str(task.get('sample_mode') or defaults.get('sample_mode') or 'auto').lower()
     save_report = task.get('save_report', True)
     custom_prompt = task.get('prompt')
     include_audio = bool(task.get('include_audio', defaults.get('include_audio', False)))
@@ -275,11 +302,14 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     _c('OK', f'参数 → 时长 {meta["duration_hms"]} ({meta["duration_sec"]}s) | '
              f'分辨率 {meta["resolution"]} | {meta["fps"]}fps | 编码 {meta["codec"]} | {meta["size_mb"]}MB')
 
-    # 2) 抽帧（max_frames 可调高以「时间换精度」，受 MAX_FRAMES_HARD_CAP 保护）
-    n_frames = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
-    if max_frames > MAX_FRAMES_HARD_CAP:
-        _c('WARN', f'max_frames={max_frames} 超过安全上限，按 {MAX_FRAMES_HARD_CAP} 处理')
-    frames = extract_frames(video_path, max(0.5, interval), n_frames)
+    # 2) 抽帧（按 sample_mode 选择抽样策略；可「时间换精度」）
+    if sample_mode == 'interval':
+        _c('INFO', f'抽帧方式：时间跨度，每 {interval:g}s 一帧（安全上限 {MAX_FRAMES_HARD_CAP} 帧）')
+    elif sample_mode == 'count':
+        _c('INFO', f'抽帧方式：固定张数，全片均匀 {max_frames} 帧')
+    else:
+        _c('INFO', f'抽帧方式：自动（≤{max_frames} 帧且不密于 {interval:g}s）')
+    frames = extract_frames(video_path, max(0.5, interval), max_frames, sample_mode)
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
         return

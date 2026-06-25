@@ -63,3 +63,73 @@ Everything's working so far—the Python compiles, JSON is valid, and the Whispe
 校验结果：`py_compile` 通过、lint 0 错误、JSON 合法、Whisper 加载成功。文档 `docs/use/use.md` 的字段表与「声音处理/抽帧调优」说明已同步更新。
 
 > 关于你提到的**完整视频理解（Gemini 类）、硬字幕 OCR、动作捕捉（MediaPipe/OpenPose）、模拟学习（Isaac/MuJoCo）**——这些都超出当前"抽帧+VLM"本地管线的范畴，属于独立 CV/RL 体系。如果以后想做**硬字幕 OCR**（PaddleOCR 每 1~2 秒扫一遍画面拼文本），我可以再给你加一个独立步骤，它和现在的音频转写是并列模块，互不影响。需要的话随时说。
+
+
+
+
+FC2-PPV-2763672_1 00_27_00-00_54_00.mp4
+FC2-PPV-2763672_1 00_54_00-01_20_00.mp4
+FC2-PPV-2763672_1 01_20_00-01_47_53.mp4
+FC2-PPV-2763672_2.mp4
+
+./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-4.json --ollama-url http://localhost:11434
+
+
+I need to refactor the sampling configuration to let users choose between two distinct modes: either a fixed frame count or a time-based interval. The current logic blends both together, but the user wants explicit control over which approach to use. I should also look at how other tools handle frame sampling to inform the design. Refactoring the timestamp computation logic... I need to stay focused on the primary ask: implementing the sampling mode config so users can choose between frame-count or time-interval sampling. I'll add the environment variable guard at the top of the file as they suggested since it's low-risk, then walk through the extract_frames function to wire up the sampling logic properly and surface the effective sampling rate in the logs. For the broader improvements question, I'll mention scene-change detection as a concrete next step but keep the scope tight. Refining extract_frames to handle sample_mode with three strategies: 'count' mode divides duration evenly across max_frames, 'interval' mode uses the specified frame_interval and caps total frames, and 'auto' mode balances both constraints by taking the larger of frame_interval or the even distribution across max_frames. Refining the frame sampling logic...
+
+I'm consolidating the step and limit calculations so that all modes follow a unified loop: compute the step size and maximum frame count upfront, then iterate while staying under both the duration and frame limit. For interval mode, I'm ensuring the step respects the minimum frame interval and caps total frames if needed. For count mode, I'm distributing frames evenly across the duration. Auto mode picks the larger of the two constraints. Then in run_task, I'll log which sampling mode is active with its parameters, and let extract_frames handle the actual frame extraction without redundant warnings.
+
+I'm also adding environment variable setup at the top of the file to suppress the macOS dylib warning before importing cv2.
+数据很漂亮！52 分钟视频 + 1 万字转写 6.6 分钟跑完，声画全模态确实跑通了。针对你的核心诉求——**让抽帧策略可配（固定张数 vs 时间跨度）**，我来升级，并顺手把你提到的 dylib 隐患在脚本里挡掉。
+
+**1) 在导入 cv2/av 之前抑制 macOS libav 重复加载告警（消除潜在崩溃风险）：**
+**2) 重写抽帧逻辑，支持三种抽样模式：**
+**3) `run_task` 读取 `sample_mode` 并按模式抽帧、打印方式说明：**
+**4) 更新 `video-tasks.json`，把 `72.mp4` 示例改成"每分钟一帧 + small 模型"，并展示两种模式：**
+校验 + lint，并实测三种 `sample_mode` 在你的 `72.mp4`（616s）上的抽帧数量是否符合预期（只抽帧，不调模型）：
+The sampling modes are working correctly across different configurations—fixed count gives 16 frames, time-based intervals calculate the expected frame counts based on video duration, and auto mode also produces 16 frames. The interval mode properly ignores the max_frames parameter since it's using time-based sampling instead.
+
+Now I'll run the linter to check for any issues, update the documentation, and then work through the mainstream approaches analysis.
+三种模式实测全部符合预期：
+
+| 模式 | 参数 | 616s 视频抽帧数 |
+|---|---|---|
+| `count` | max_frames=16 | **16 帧**（固定张数） |
+| `interval` | 每 60s | **11 帧**（按时长，无视 max_frames） |
+| `interval` | 每 30s | **21 帧** |
+| `auto` | 旧行为 | **16 帧** |
+
+lint 检查 + 同步更新文档：
+全部完成、验证通过（编译 OK、lint 0 错误、JSON 合法、三种模式实测正确）。
+
+## 升级内容
+
+### 抽帧策略现在可配（`sample_mode`）
+在 `video-tasks.json` 里每个任务（或顶层默认）写：
+
+| 模式 | 含义 | 例子 |
+|---|---|---|
+| `"count"` | 固定张数，全片均匀抽 `max_frames` 帧 | `sample_mode:"count", max_frames:16` |
+| `"interval"` | **时间跨度**，每 `frame_interval` 秒抽一帧 | `sample_mode:"interval", frame_interval:60`（每分钟一帧） |
+| `"auto"` | 旧默认行为（≤max_frames 且不密于 interval） | 兼容用 |
+
+我已把 `72.mp4` 示例改成 `interval` / 每 60s 一帧 + `whisper_model: small`（中文更准）。安全上限 2000 帧，超长自动均匀铺满。
+
+### 顺手修掉的隐患
+脚本顶部（导入 cv2/av 之前）加了 `OBJC_DISABLE_INITIALIZE_FORK_SAFETY` 和 `KMP_DUPLICATE_LIB_OK`，抑制你日志里那条 libav 重复加载告警与潜在崩溃。HF 限流警告无需处理（模型已缓存到 `~/.cache/huggingface`，再跑不联网）。
+
+---
+
+## 主流抽帧方案对比（你现在在哪、还能往哪走）
+
+| 方案 | 原理 | 优点 / 代价 | 你的现状 |
+|---|---|---|---|
+| **均匀抽帧** Uniform | 按固定张数/间隔等距取 | 简单快；会漏场景切换 | ✅ 已支持（count/interval） |
+| **关键帧/场景切分** Scene-cut | 用帧间差异(如 PySceneDetect/直方图差)在"画面突变处"取帧 | 抓住每个镜头，几乎不漏剧情；需额外算差异 | ⬜ 可加（最推荐的下一步） |
+| **内容去重** Embedding dedup | 对帧算特征(CLIP/感知哈希)，丢掉高度相似帧 | 省模型调用、避免重复描述 | ⬜ 可加 |
+| **运动/音频引导** | 在"动作剧烈"或"有人说话"的时间段加密抽帧 | 详略得当；逻辑更复杂 | ⬜ 进阶 |
+| **硬字幕 OCR** | 每 1~2s 扫画面用 PaddleOCR 抠字 | 补齐烧录字幕；与音频转写互补 | ⬜ 独立模块可加 |
+
+**最务实的下一步是「场景切分抽帧」**：用 `scenedetect`（或自写帧间直方图差）找镜头边界，每个镜头取 1 帧 + 时间过长再补抽。这样 1 小时视频可能只产生 30~80 个"有信息量"的帧，比固定间隔更聪明，既不漏镜头也不浪费模型调用。
+
+要的话我可以新增一个 `"sample_mode": "scene"`，用帧间差异自动找切换点抽帧——你说一声我就接上。

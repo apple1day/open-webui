@@ -101,28 +101,37 @@ USE_MYSQL=0 PULL_MODEL=1 ./start-video-analysis.sh
 | `model` | 视觉模型（必须能看图，如 `minicpm-v:latest` / `llava:latest`） |
 | `summary_model` | 汇总用文本模型；留空＝同 `model` |
 | `language` | `zh` / `en` 输出语言 |
-| `frame_interval` | 抽帧间隔（秒），默认 5。**调小＝抽更多帧** |
-| `max_frames` | 最多抽帧数，默认 16，安全上限 2000。**调大＝更细但更慢**（用时间换精度） |
+| `sample_mode` | 抽帧策略：`count`(固定张数) / `interval`(按时间跨度) / `auto`(默认,兼容旧行为) |
+| `frame_interval` | 抽帧间隔（秒）。`interval` 模式下＝每隔几秒抽一帧；`auto` 下为"最密间隔" |
+| `max_frames` | 抽帧张数。`count`/`auto` 模式生效；安全上限 2000。**调大＝更细但更慢** |
 | `include_audio` | 是否转写音轨（声音/台词/旁白），默认 false |
-| `whisper_model` | 语音模型：`tiny`/`base`/`small`/`medium`/`large-v3`（越大越准越慢） |
+| `whisper_model` | 语音模型：`tiny`/`base`/`small`/`medium`/`large-v3`（越大越准越慢，中文建议 `small`+） |
 | `whisper_language` | 强制语种（如 `zh`/`en`）；`null` 自动检测 |
 | `prompt` | 自定义逐帧提示词；`null` 用内置提示 |
 | `save_report` | 是否在视频同目录生成 `<视频名>.analysis.md` |
 
-要分析多个视频，往 `tasks` 数组里再加对象即可。顶层的 `default_*` / `include_audio` / `whisper_*`
-为所有任务的默认值，单个任务里同名字段可覆盖。
+要分析多个视频，往 `tasks` 数组里再加对象即可。顶层的 `default_*` / `include_audio` / `whisper_*` /
+`sample_mode` 为所有任务的默认值，单个任务里同名字段可覆盖。
 
-#### 声音处理与抽帧调优
+#### 抽帧策略：固定张数 vs 时间跨度
 
-- **加声音**：把任务的 `include_audio` 设为 `true`。脚本会用本地 **faster-whisper**
+| 模式 | 行为 | 适用 |
+|---|---|---|
+| `count` | 全片**均匀抽 `max_frames` 帧**（无视 `frame_interval`） | 想固定开销、快速预览 |
+| `interval` | **每 `frame_interval` 秒抽 1 帧**（无视 `max_frames`，长视频更完整） | 长视频、不想漏场景切换 |
+| `auto` | ≤ `max_frames` 帧且不密于 `frame_interval`（旧默认行为） | 兼容、折中 |
+
+例：1 小时视频「每分钟一帧」→ `"sample_mode": "interval", "frame_interval": 60`（约 60 帧）。
+帧越多越细，但逐帧调用模型，耗时随帧数近似线性增长（安全上限 2000 帧）。
+
+#### 声音处理
+
+- 把任务的 `include_audio` 设为 `true`。脚本会用本地 **faster-whisper**
   （内部用 PyAV 直接从视频解码音轨，**无需安装 ffmpeg**）转写台词/旁白，
-  和画面描述一起喂给汇总模型，让结论"声画结合"。开启后还会在视频同目录额外生成
-  `<视频名>.srt` 字幕文件。
-- **时间换精度**：1 小时视频默认只抽 16 帧会漏细节。可**调大 `max_frames`**（如 120）
-  或**调小 `frame_interval`**（如 2 秒一帧）来抽更多帧，分析更细——代价是逐帧调用模型，
-  耗时随帧数线性增长。安全上限 2000 帧。
-- 报告输出：`<视频名>.analysis.md`，含 **主要参数（时长/分辨率/帧率/编码/总帧数/大小）**
-  + 结构化分析（结合音频）+ 音频转写 + 逐帧描述。主要参数由 OpenCV 真实解码得出。
+  和画面描述一起喂给汇总模型，让结论"声画结合"，并额外生成 `<视频名>.srt` 字幕。
+- 中文若错别字偏多，把 `whisper_model` 从 `base` 提到 `small` 或 `medium`（int8 下依然较快）。
+- 报告 `<视频名>.analysis.md` 含：**主要参数（时长/分辨率/帧率/编码/总帧数/大小）** +
+  结构化分析（结合音频）+ 音频转写 + 逐帧描述。主要参数由 OpenCV 真实解码得出。
 
 ---
 
@@ -188,4 +197,10 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 
 ```bash
 ./venv/bin/python -c "import cv2, faster_whisper, aiomysql, pymysql; print('deps OK')"
+```
+
+### 2026-6-25
+```shell
+
+./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-4.json --ollama-url http://localhost:11434
 ```

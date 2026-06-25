@@ -6,16 +6,18 @@
   "include_audio": false,
   "whisper_model": "base",
   "whisper_language": null,
+  "sample_mode": "auto",
   "tasks": [
     {
       "video_path": "/Users/even/mine/some/72.mp4",
       "model": "minicpm-v:latest",
       "summary_model": "qwen2.5:14b",
       "language": "zh",
-      "frame_interval": 5,
+      "sample_mode": "interval",
+      "frame_interval": 60,
       "max_frames": 16,
       "include_audio": true,
-      "whisper_model": "base",
+      "whisper_model": "small",
       "prompt": null,
       "save_report": true
     }
