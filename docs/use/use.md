@@ -238,6 +238,13 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
     }
   
 ./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-6.json 
-    
+
+
+# 15：39
+#开始使用mlx直接运行，这里还是基于ollama，看起来也可以脱离ollama进行
+./venv/bin/python scripts/video_tasks.py --backend mlx --summary-backend ollama
+
+
+
 ```
 

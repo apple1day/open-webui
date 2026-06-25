@@ -7,7 +7,7 @@
   "whisper_model": "base",
   "whisper_language": null,
   "sample_mode": "auto",
-  "output_dir": "/Users/even/code/code_deal/my-webui/docs/",
+  "output_dir": "/Users/even/code/code_deal/my-webui/docs/results/",
   "stream_log": true,
   "tasks": [
     {

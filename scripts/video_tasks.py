@@ -58,6 +58,12 @@ DEFAULT_SCENE_THRESHOLD = 0.6   # scene 模式：HSV 直方图相关度阈值，
 DEFAULT_SCENE_PROBE = 1.0       # scene 模式：每隔多少秒探测一次（越小越细、越慢）
 SUPPORTED_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v', '.mpg', '.mpeg', '.wmv', '.ts'}
 
+# MLX 后端默认模型（Apple Silicon 原生；24GB 内存推荐 4bit 量化版）
+DEFAULT_MLX_VLM_MODEL = 'mlx-community/Qwen2.5-VL-7B-Instruct-4bit'   # 视觉（逐帧识别）
+DEFAULT_MLX_LM_MODEL = 'mlx-community/Qwen2.5-7B-Instruct-4bit'       # 文本（汇总）
+DEFAULT_FRAME_MAX_TOKENS = 300     # MLX 逐帧描述的最大生成 token
+DEFAULT_SUMMARY_MAX_TOKENS = 1200  # MLX 汇总的最大生成 token
+
 
 def _c(tag: str, msg: str) -> None:
     colors = {'INFO': '34', 'OK': '32', 'WARN': '33', 'ERR': '31'}
@@ -249,6 +255,146 @@ def ollama_chat(
 
 
 # --------------------------------------------------------------------------- #
+# 3.2) MLX 后端（Apple Silicon 原生）
+# 视觉用 mlx-vlm、文本汇总用 mlx-lm；相比 Ollama(GGUF/llama.cpp) 在苹果芯片上
+# 利用统一内存零拷贝 + Metal，通常更快、占用更低。
+#   安装： pip install -U mlx mlx-vlm mlx-lm
+#   视觉模型示例： mlx-community/Qwen2.5-VL-7B-Instruct-4bit
+#   文本模型示例： mlx-community/Qwen2.5-7B-Instruct-4bit
+# 完全离线：模型首次自动从 HuggingFace 下载到本地缓存，之后断网可用。
+# --------------------------------------------------------------------------- #
+_MLX_VLM_CACHE: dict = {}   # model_id -> (model, processor, config)
+_MLX_LM_CACHE: dict = {}    # model_id -> (model, tokenizer)
+
+
+def _b64_to_pil(b64: str):
+    """base64(JPEG) → PIL.Image（RGB），供 mlx-vlm 直接消费。"""
+    import io
+    from PIL import Image
+    return Image.open(io.BytesIO(base64.b64decode(b64))).convert('RGB')
+
+
+def _load_mlx_vlm(model_id: str):
+    cached = _MLX_VLM_CACHE.get(model_id)
+    if cached is not None:
+        return cached
+    from mlx_vlm import load
+    _c('INFO', f'加载 MLX 视觉模型「{model_id}」(首次会下载, 之后走本地缓存)…')
+    model, processor = load(model_id)
+    try:
+        config = model.config
+    except Exception:
+        from mlx_vlm.utils import load_config
+        config = load_config(model_id)
+    _MLX_VLM_CACHE[model_id] = (model, processor, config)
+    return _MLX_VLM_CACHE[model_id]
+
+
+def _vlm_call(fn, model, processor, prompt, images, kwargs):
+    """兼容 mlx-vlm 不同版本的图像入参：image= / images= / 位置参数。"""
+    try:
+        return fn(model, processor, prompt, image=images, **kwargs)
+    except TypeError:
+        pass
+    try:
+        return fn(model, processor, prompt, images=images, **kwargs)
+    except TypeError:
+        return fn(model, processor, prompt, images, **kwargs)
+
+
+def mlx_vlm_chat(model_id, content, images, *, stream=False, on_delta=None,
+                 max_tokens: int = DEFAULT_FRAME_MAX_TOKENS) -> str:
+    """用 mlx-vlm 对一帧/多帧图像做视觉理解，签名对齐 ollama_chat。"""
+    model, processor, config = _load_mlx_vlm(model_id)
+    from mlx_vlm.prompt_utils import apply_chat_template
+    pil_images = [_b64_to_pil(b) for b in (images or [])]
+    try:
+        prompt = apply_chat_template(processor, config, content, num_images=len(pil_images))
+    except TypeError:
+        prompt = apply_chat_template(processor, config, content, len(pil_images))
+
+    kwargs = {'max_tokens': max_tokens, 'verbose': False}
+    if stream:
+        try:
+            from mlx_vlm import stream_generate
+            parts: list[str] = []
+            for chunk in _vlm_call(stream_generate, model, processor, prompt, pil_images, kwargs):
+                t = getattr(chunk, 'text', None)
+                if t is None:
+                    t = chunk if isinstance(chunk, str) else ''
+                if t:
+                    parts.append(t)
+                    if on_delta:
+                        on_delta(t)
+            return ''.join(parts)
+        except Exception:
+            pass  # 不支持流式则回退非流式
+    from mlx_vlm import generate
+    out = _vlm_call(generate, model, processor, prompt, pil_images, kwargs)
+    text = getattr(out, 'text', None)
+    if text is None:
+        text = out if isinstance(out, str) else str(out)
+    if stream and on_delta and text:
+        on_delta(text)
+    return text
+
+
+def _load_mlx_lm(model_id: str):
+    cached = _MLX_LM_CACHE.get(model_id)
+    if cached is not None:
+        return cached
+    from mlx_lm import load
+    _c('INFO', f'加载 MLX 文本模型「{model_id}」(首次会下载)…')
+    model, tokenizer = load(model_id)
+    _MLX_LM_CACHE[model_id] = (model, tokenizer)
+    return _MLX_LM_CACHE[model_id]
+
+
+def mlx_lm_chat(model_id, content, *, stream=False, on_delta=None,
+                max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS) -> str:
+    """用 mlx-lm 做纯文本生成（汇总），签名对齐 ollama_chat。"""
+    model, tokenizer = _load_mlx_lm(model_id)
+    messages = [{'role': 'user', 'content': content}]
+    try:
+        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+    except Exception:
+        prompt = content
+
+    if stream:
+        try:
+            from mlx_lm import stream_generate
+            parts: list[str] = []
+            for r in stream_generate(model, tokenizer, prompt, max_tokens=max_tokens):
+                t = getattr(r, 'text', None)
+                if t is None:
+                    t = r if isinstance(r, str) else ''
+                if t:
+                    parts.append(t)
+                    if on_delta:
+                        on_delta(t)
+            return ''.join(parts)
+        except Exception:
+            pass
+    from mlx_lm import generate
+    out = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, verbose=False)
+    return out if isinstance(out, str) else getattr(out, 'text', str(out))
+
+
+# --------------------------------------------------------------------------- #
+# 3.3) 统一调度：按 backend 选择 ollama / mlx，对外签名一致
+# --------------------------------------------------------------------------- #
+def chat(backend, ollama_url, model, content, images=None, *,
+         stream=False, on_delta=None, max_tokens=None) -> str:
+    if (backend or 'ollama').lower() == 'mlx':
+        if images:
+            return mlx_vlm_chat(model, content, images, stream=stream, on_delta=on_delta,
+                                max_tokens=max_tokens or DEFAULT_FRAME_MAX_TOKENS)
+        return mlx_lm_chat(model, content, stream=stream, on_delta=on_delta,
+                           max_tokens=max_tokens or DEFAULT_SUMMARY_MAX_TOKENS)
+    return ollama_chat(ollama_url, model, content, images=images, stream=stream, on_delta=on_delta)
+
+
+# --------------------------------------------------------------------------- #
 # 3.5) 音频转写（faster-whisper，可选）
 # faster-whisper 内部用 PyAV 直接从视频解码音轨，无需系统安装 ffmpeg。
 # --------------------------------------------------------------------------- #
@@ -360,8 +506,22 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         _c('ERR', f'不支持的视频格式：{video_path}')
         return
 
-    model = task.get('model') or defaults.get('default_model')
-    summary_model = task.get('summary_model') or defaults.get('default_summary_model') or model
+    # 后端选择：视觉与汇总可分别走 ollama 或 mlx（Apple Silicon 原生）。
+    vision_backend = str(task.get('backend') or defaults.get('backend') or 'ollama').lower()
+    summary_backend = str(task.get('summary_backend') or defaults.get('summary_backend') or vision_backend).lower()
+
+    if vision_backend == 'mlx':
+        model = task.get('mlx_model') or defaults.get('mlx_model') or DEFAULT_MLX_VLM_MODEL
+    else:
+        model = task.get('model') or defaults.get('default_model')
+
+    if summary_backend == 'mlx':
+        summary_model = task.get('mlx_summary_model') or defaults.get('mlx_summary_model') or DEFAULT_MLX_LM_MODEL
+    else:
+        summary_model = task.get('summary_model') or defaults.get('default_summary_model') or model
+
+    frame_max_tokens = int(task.get('frame_max_tokens', defaults.get('frame_max_tokens', DEFAULT_FRAME_MAX_TOKENS)))
+    summary_max_tokens = int(task.get('summary_max_tokens', defaults.get('summary_max_tokens', DEFAULT_SUMMARY_MAX_TOKENS)))
     language = task.get('language', defaults.get('language', 'zh'))
     interval = float(task.get('frame_interval', DEFAULT_FRAME_INTERVAL))
     max_frames = int(task.get('max_frames', DEFAULT_MAX_FRAMES))
@@ -387,6 +547,9 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
 
     started = time.time()
     _c('INFO', f'分析：{video_path}')
+    if vision_backend == 'mlx' or summary_backend == 'mlx':
+        _c('INFO', f'MLX 后端启用（视觉={vision_backend} / 汇总={summary_backend}）；'
+                   f'首次使用会自动下载模型，请耐心等待。')
 
     # 1) 主要参数
     meta = probe_metadata(video_path)
@@ -406,7 +569,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
         return
-    _c('INFO', f'已抽取 {len(frames)} 帧，使用视觉模型 {model} 逐帧识别…')
+    _c('INFO', f'已抽取 {len(frames)} 帧，使用视觉模型 [{vision_backend}] {model} 逐帧识别…')
 
     # 3) 逐帧描述（顺序，避免本机显存压力）
     fp = frame_prompt(language, custom_prompt)
@@ -418,14 +581,16 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
                 # 流式：边识别边把描述吐到终端，实时可见
                 sys.stdout.write('\033[2m      ')  # 暗色缩进前缀
                 sys.stdout.flush()
-                desc = ollama_chat(
-                    ollama_url, model, fp, images=[b64],
+                desc = chat(
+                    vision_backend, ollama_url, model, fp, images=[b64],
                     stream=True, on_delta=lambda d: (sys.stdout.write(d), sys.stdout.flush()),
+                    max_tokens=frame_max_tokens,
                 ).strip()
                 sys.stdout.write('\033[0m\n')
                 sys.stdout.flush()
             else:
-                desc = ollama_chat(ollama_url, model, fp, images=[b64]).strip()
+                desc = chat(vision_backend, ollama_url, model, fp, images=[b64],
+                            max_tokens=frame_max_tokens).strip()
         except Exception as exc:
             desc = f'(帧识别失败：{exc})'
             _c('WARN', f'  帧 {i + 1} 识别失败：{exc}')
@@ -446,7 +611,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
             _c('WARN', '未获得音频转写文本（可能无音轨或 faster-whisper 不可用）')
 
     # 4) 汇总（结合画面 + 音频）
-    _c('INFO', f'使用 {summary_model} 汇总…')
+    _c('INFO', f'使用 [{summary_backend}] {summary_model} 汇总…')
     joined = '\n'.join(f'- [{ts:.1f}s] {desc}' for _, ts, desc in frame_results)
     fuse_input = f'{summary_prompt(language, meta, transcript)}\n\n## 画面帧描述\n{joined}'
     if transcript:
@@ -455,14 +620,16 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         if stream_log:
             sys.stdout.write('\033[2m')  # 暗色显示汇总过程
             sys.stdout.flush()
-            summary = ollama_chat(
-                ollama_url, summary_model, fuse_input,
+            summary = chat(
+                summary_backend, ollama_url, summary_model, fuse_input,
                 stream=True, on_delta=lambda d: (sys.stdout.write(d), sys.stdout.flush()),
+                max_tokens=summary_max_tokens,
             ).strip()
             sys.stdout.write('\033[0m\n')
             sys.stdout.flush()
         else:
-            summary = ollama_chat(ollama_url, summary_model, fuse_input).strip()
+            summary = chat(summary_backend, ollama_url, summary_model, fuse_input,
+                           max_tokens=summary_max_tokens).strip()
     except Exception as exc:
         summary = f'(汇总失败：{exc})'
 
@@ -528,6 +695,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description='离线视频分析任务运行器')
     parser.add_argument('--config', default=default_config, help='任务配置 JSON 路径')
     parser.add_argument('--ollama-url', default=None, help='覆盖 Ollama 地址')
+    parser.add_argument('--backend', choices=['ollama', 'mlx'], default=None,
+                        help='视觉(逐帧)后端：ollama | mlx（Apple Silicon 原生）')
+    parser.add_argument('--summary-backend', choices=['ollama', 'mlx'], default=None,
+                        help='汇总后端：ollama | mlx（默认跟随 --backend）')
+    parser.add_argument('--mlx-model', default=None,
+                        help=f'MLX 视觉模型 id（默认 {DEFAULT_MLX_VLM_MODEL}）')
+    parser.add_argument('--mlx-summary-model', default=None,
+                        help=f'MLX 文本汇总模型 id（默认 {DEFAULT_MLX_LM_MODEL}）')
     args = parser.parse_args()
 
     if not os.path.isfile(args.config):
@@ -537,20 +712,41 @@ def main() -> int:
     with open(args.config, 'r', encoding='utf-8') as f:
         cfg = json.load(f)
 
+    # CLI 覆盖到全局默认（任务级配置仍可逐条覆盖）
+    if args.backend:
+        cfg['backend'] = args.backend
+    if args.summary_backend:
+        cfg['summary_backend'] = args.summary_backend
+    if args.mlx_model:
+        cfg['mlx_model'] = args.mlx_model
+    if args.mlx_summary_model:
+        cfg['mlx_summary_model'] = args.mlx_summary_model
+
     ollama_url = args.ollama_url or cfg.get('ollama_url') or os.getenv('OLLAMA_BASE_URL') or 'http://localhost:11434'
     tasks = cfg.get('tasks', [])
     if not tasks:
         _c('WARN', 'video-tasks.json 中没有任务（tasks 为空），跳过。')
         return 0
 
-    # 探活 Ollama
-    try:
-        urllib.request.urlopen(f'{ollama_url.rstrip("/")}/api/tags', timeout=10).read()
-    except Exception as exc:
-        _c('ERR', f'无法连接 Ollama（{ollama_url}）：{exc}')
-        return 1
+    # 计算每个任务的有效后端，判断是否真的需要连 Ollama
+    def _eff_backends(task: dict) -> tuple[str, str]:
+        vb = str(task.get('backend') or cfg.get('backend') or 'ollama').lower()
+        sb = str(task.get('summary_backend') or cfg.get('summary_backend') or vb).lower()
+        return vb, sb
 
-    _c('INFO', f'共 {len(tasks)} 个视频任务，Ollama = {ollama_url}')
+    need_ollama = any('ollama' in _eff_backends(t) for t in tasks)
+
+    # 探活 Ollama（仅当确有任务使用 ollama 后端时）
+    if need_ollama:
+        try:
+            urllib.request.urlopen(f'{ollama_url.rstrip("/")}/api/tags', timeout=10).read()
+        except Exception as exc:
+            _c('ERR', f'无法连接 Ollama（{ollama_url}）：{exc}')
+            return 1
+        _c('INFO', f'共 {len(tasks)} 个视频任务，Ollama = {ollama_url}')
+    else:
+        _c('INFO', f'共 {len(tasks)} 个视频任务，全部使用 MLX 后端（跳过 Ollama 探活）。')
+
     for task in tasks:
         try:
             run_task(task, cfg, ollama_url)
