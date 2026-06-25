@@ -73,6 +73,9 @@ USE_MYSQL=0 PULL_MODEL=1 ./start-video-analysis.sh
   "default_model": "minicpm-v:latest",
   "default_summary_model": "qwen2.5:14b",
   "language": "zh",
+  "include_audio": false,
+  "whisper_model": "base",
+  "whisper_language": null,
   "tasks": [
     {
       "video_path": "/Users/even/mine/some/72.mp4",
@@ -81,6 +84,8 @@ USE_MYSQL=0 PULL_MODEL=1 ./start-video-analysis.sh
       "language": "zh",
       "frame_interval": 5,
       "max_frames": 16,
+      "include_audio": true,
+      "whisper_model": "base",
       "prompt": null,
       "save_report": true
     }
@@ -96,16 +101,28 @@ USE_MYSQL=0 PULL_MODEL=1 ./start-video-analysis.sh
 | `model` | 视觉模型（必须能看图，如 `minicpm-v:latest` / `llava:latest`） |
 | `summary_model` | 汇总用文本模型；留空＝同 `model` |
 | `language` | `zh` / `en` 输出语言 |
-| `frame_interval` | 抽帧间隔（秒），默认 5 |
-| `max_frames` | 最多抽帧数（上限 64），默认 16 |
+| `frame_interval` | 抽帧间隔（秒），默认 5。**调小＝抽更多帧** |
+| `max_frames` | 最多抽帧数，默认 16，安全上限 2000。**调大＝更细但更慢**（用时间换精度） |
+| `include_audio` | 是否转写音轨（声音/台词/旁白），默认 false |
+| `whisper_model` | 语音模型：`tiny`/`base`/`small`/`medium`/`large-v3`（越大越准越慢） |
+| `whisper_language` | 强制语种（如 `zh`/`en`）；`null` 自动检测 |
 | `prompt` | 自定义逐帧提示词；`null` 用内置提示 |
 | `save_report` | 是否在视频同目录生成 `<视频名>.analysis.md` |
 
-要分析多个视频，往 `tasks` 数组里再加对象即可。
+要分析多个视频，往 `tasks` 数组里再加对象即可。顶层的 `default_*` / `include_audio` / `whisper_*`
+为所有任务的默认值，单个任务里同名字段可覆盖。
 
-报告输出：在视频同目录生成 `<视频名>.analysis.md`，包含
-**主要参数（时长 / 分辨率 / 帧率 / 编码 / 总帧数 / 大小）** + 结构化分析 + 逐帧描述。
-主要参数由 OpenCV 真实解码得出，无需安装 ffmpeg。
+#### 声音处理与抽帧调优
+
+- **加声音**：把任务的 `include_audio` 设为 `true`。脚本会用本地 **faster-whisper**
+  （内部用 PyAV 直接从视频解码音轨，**无需安装 ffmpeg**）转写台词/旁白，
+  和画面描述一起喂给汇总模型，让结论"声画结合"。开启后还会在视频同目录额外生成
+  `<视频名>.srt` 字幕文件。
+- **时间换精度**：1 小时视频默认只抽 16 帧会漏细节。可**调大 `max_frames`**（如 120）
+  或**调小 `frame_interval`**（如 2 秒一帧）来抽更多帧，分析更细——代价是逐帧调用模型，
+  耗时随帧数线性增长。安全上限 2000 帧。
+- 报告输出：`<视频名>.analysis.md`，含 **主要参数（时长/分辨率/帧率/编码/总帧数/大小）**
+  + 结构化分析（结合音频）+ 音频转写 + 逐帧描述。主要参数由 OpenCV 真实解码得出。
 
 ---
 

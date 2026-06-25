@@ -3,6 +3,9 @@
   "default_model": "minicpm-v:latest",
   "default_summary_model": "qwen2.5:14b",
   "language": "zh",
+  "include_audio": false,
+  "whisper_model": "base",
+  "whisper_language": null,
   "tasks": [
     {
       "video_path": "/Users/even/mine/some/72.mp4",
@@ -11,6 +14,8 @@
       "language": "zh",
       "frame_interval": 5,
       "max_frames": 16,
+      "include_audio": true,
+      "whisper_model": "base",
       "prompt": null,
       "save_report": true
     }

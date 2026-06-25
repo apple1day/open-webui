@@ -6,9 +6,12 @@
 - 在代码/配置里预先写好要分析的视频任务（见同目录上层的 ``video-tasks.json``），
   启动系统时自动逐个调用本机 Ollama 视觉模型完成分析，无需登录、无需后端。
 - 真实读取视频「主要参数」：时长 / 分辨率 / 帧率 / 编码（用 OpenCV，不依赖 ffmpeg/ffprobe）。
-- 抽帧 → 视觉模型逐帧描述 → 文本模型汇总 → 在视频同目录写出 ``<name>.analysis.md``。
+- 抽帧 → 视觉模型逐帧描述 →（可选）faster-whisper 转写音轨 → 文本模型结合声画汇总
+  → 在视频同目录写出 ``<name>.analysis.md``（开启音频时另写 ``<name>.srt`` 字幕）。
 
-仅依赖：opencv-python(headless) + Python 标准库（urllib）。直连 Ollama HTTP API。
+依赖：opencv-python(headless) 必需；faster-whisper 可选（开启音频转写时才需要，
+内部用 PyAV 直接从视频解码音轨，无需系统 ffmpeg）。其余仅用 Python 标准库（urllib）。
+直连 Ollama HTTP API。
 
 用法
 ----
@@ -41,8 +44,10 @@ except Exception as exc:  # pragma: no cover
 # 默认参数（与后端 video_analysis.py 保持一致的量级）
 # --------------------------------------------------------------------------- #
 DEFAULT_FRAME_INTERVAL = 5.0   # 抽帧间隔（秒）
-DEFAULT_MAX_FRAMES = 16        # 单个视频最多抽帧数
+DEFAULT_MAX_FRAMES = 16        # 单个视频默认抽帧数
+MAX_FRAMES_HARD_CAP = 2000     # 安全上限：可大幅调高 max_frames 以「时间换精度」（越多越慢越细）
 MAX_FRAME_EDGE = 768           # 长边缩放上限，控制 base64 体积
+DEFAULT_WHISPER_MODEL = 'base'  # faster-whisper 模型：tiny/base/small/medium/large-v3（越大越准越慢）
 SUPPORTED_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v', '.mpg', '.mpeg', '.wmv', '.ts'}
 
 
@@ -147,6 +152,67 @@ def ollama_chat(ollama_url: str, model: str, content: str, images: Optional[list
 
 
 # --------------------------------------------------------------------------- #
+# 3.5) 音频转写（faster-whisper，可选）
+# faster-whisper 内部用 PyAV 直接从视频解码音轨，无需系统安装 ffmpeg。
+# --------------------------------------------------------------------------- #
+_WHISPER_CACHE: dict = {}  # 同一进程内复用已加载的模型，避免重复初始化
+
+
+def _srt_ts(seconds: float) -> str:
+    """秒 → SRT 时间戳 HH:MM:SS,mmm。"""
+    ms = int(round(max(0.0, seconds) * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
+
+
+def transcribe_audio(video_path: str, whisper_model: str, language: Optional[str] = None):
+    """用 faster-whisper 转写视频音轨。
+
+    返回 ``(full_text, segments)``，其中 segments 为 ``[(start, end, text), ...]``。
+    未安装 faster-whisper、模型加载失败或视频无音轨时，返回 ``('', [])``。
+    """
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        _c('WARN', f'未安装 faster-whisper，跳过音频转写：{exc}')
+        return '', []
+
+    model = _WHISPER_CACHE.get(whisper_model)
+    if model is None:
+        _c('INFO', f'加载 Whisper 模型「{whisper_model}」(首次会下载/初始化, CPU int8)…')
+        try:
+            model = WhisperModel(whisper_model, device='cpu', compute_type='int8')
+        except Exception as exc:
+            _c('WARN', f'加载 Whisper 失败，跳过音频：{exc}')
+            return '', []
+        _WHISPER_CACHE[whisper_model] = model
+
+    try:
+        segments, _info = model.transcribe(video_path, beam_size=5, language=language or None)
+        seg_list = [(float(s.start), float(s.end), (s.text or '').strip()) for s in segments]
+    except Exception as exc:
+        _c('WARN', f'音频转写失败（可能无音轨）：{exc}')
+        return '', []
+
+    full_text = ' '.join(t for _, _, t in seg_list if t).strip()
+    return full_text, seg_list
+
+
+def write_srt(video_path: str, segments) -> Optional[str]:
+    """把转写分段写成与视频同名的 .srt 字幕文件。"""
+    if not segments:
+        return None
+    base, _ = os.path.splitext(video_path)
+    srt_path = f'{base}.srt'
+    with open(srt_path, 'w', encoding='utf-8') as f:
+        for i, (start, end, text) in enumerate(segments, 1):
+            f.write(f'{i}\n{_srt_ts(start)} --> {_srt_ts(end)}\n{text}\n\n')
+    return srt_path
+
+
+# --------------------------------------------------------------------------- #
 # 提示词
 # --------------------------------------------------------------------------- #
 def frame_prompt(language: str, custom: Optional[str]) -> str:
@@ -158,7 +224,7 @@ def frame_prompt(language: str, custom: Optional[str]) -> str:
     return '请详细描述这一帧画面：场景、人物、动作、画面文字、关键物体以及整体氛围。请简洁（2-4 句）。'
 
 
-def summary_prompt(language: str, meta: dict) -> str:
+def summary_prompt(language: str, meta: dict, transcript: str = '') -> str:
     if language == 'en':
         head = ('Below are time-ordered frame descriptions of one video. Synthesize them into a '
                 'structured analysis with sections: ## Overview, ## Timeline, ## Key Subjects & Actions, '
@@ -166,7 +232,12 @@ def summary_prompt(language: str, meta: dict) -> str:
     else:
         head = ('以下是从同一视频按时间顺序抽取的若干帧画面描述。请整合为结构化分析，包含小节：'
                 '## 概述、## 时间线、## 主要人物与动作、## 看点、## 标签。请去重并推断整体脉络。')
-    return f'{head}\n\n（参考主要参数：时长 {meta["duration_hms"]} / 分辨率 {meta["resolution"]} / {meta["fps"]}fps / 编码 {meta["codec"]}）'
+    out = f'{head}\n\n（参考主要参数：时长 {meta["duration_hms"]} / 分辨率 {meta["resolution"]} / {meta["fps"]}fps / 编码 {meta["codec"]}）'
+    if transcript:
+        out += ('\n\nAn audio transcript is also provided; combine audio and visuals.'
+                if language == 'en' else
+                '\n\n另外提供了音频转写文本（台词/旁白），请结合声音与画面一起分析。')
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -188,6 +259,9 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     max_frames = int(task.get('max_frames', DEFAULT_MAX_FRAMES))
     save_report = task.get('save_report', True)
     custom_prompt = task.get('prompt')
+    include_audio = bool(task.get('include_audio', defaults.get('include_audio', False)))
+    whisper_model = task.get('whisper_model') or defaults.get('whisper_model') or DEFAULT_WHISPER_MODEL
+    whisper_language = task.get('whisper_language') or defaults.get('whisper_language')
 
     if not model:
         _c('ERR', f'未指定视觉模型（task.model 或 default_model）：{video_path}')
@@ -201,8 +275,11 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     _c('OK', f'参数 → 时长 {meta["duration_hms"]} ({meta["duration_sec"]}s) | '
              f'分辨率 {meta["resolution"]} | {meta["fps"]}fps | 编码 {meta["codec"]} | {meta["size_mb"]}MB')
 
-    # 2) 抽帧
-    frames = extract_frames(video_path, max(0.5, interval), max(1, min(max_frames, 64)))
+    # 2) 抽帧（max_frames 可调高以「时间换精度」，受 MAX_FRAMES_HARD_CAP 保护）
+    n_frames = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
+    if max_frames > MAX_FRAMES_HARD_CAP:
+        _c('WARN', f'max_frames={max_frames} 超过安全上限，按 {MAX_FRAMES_HARD_CAP} 处理')
+    frames = extract_frames(video_path, max(0.5, interval), n_frames)
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
         return
@@ -219,10 +296,26 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         frame_results.append((i, ts, desc))
         _c('INFO', f'  帧 {i + 1}/{len(frames)} @ {ts:.1f}s')
 
-    # 4) 汇总
+    # 3.5) 可选：音频转写（faster-whisper）
+    transcript, segments, srt_path = '', [], None
+    if include_audio:
+        _c('INFO', f'转写音频（faster-whisper / {whisper_model}）…')
+        transcript, segments = transcribe_audio(video_path, whisper_model, whisper_language)
+        if transcript:
+            _c('OK', f'音频转写完成（{len(transcript)} 字，{len(segments)} 段）')
+            if save_report:
+                srt_path = write_srt(video_path, segments)
+                if srt_path:
+                    _c('OK', f'字幕已导出 → {srt_path}')
+        else:
+            _c('WARN', '未获得音频转写文本（可能无音轨或 faster-whisper 不可用）')
+
+    # 4) 汇总（结合画面 + 音频）
     _c('INFO', f'使用 {summary_model} 汇总…')
     joined = '\n'.join(f'- [{ts:.1f}s] {desc}' for _, ts, desc in frame_results)
-    fuse_input = f'{summary_prompt(language, meta)}\n\n## 画面帧描述\n{joined}'
+    fuse_input = f'{summary_prompt(language, meta, transcript)}\n\n## 画面帧描述\n{joined}'
+    if transcript:
+        fuse_input += f'\n\n## 音频转写\n{transcript}'
     try:
         summary = ollama_chat(ollama_url, summary_model, fuse_input).strip()
     except Exception as exc:
@@ -233,11 +326,15 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
 
     # 5) 写报告
     if save_report:
-        report_path = write_report(video_path, model, summary_model, meta, frame_results, summary, elapsed)
+        report_path = write_report(
+            video_path, model, summary_model, meta, frame_results, summary, elapsed,
+            transcript=transcript, srt_path=srt_path,
+        )
         _c('OK', f'报告已保存 → {report_path}')
 
 
-def write_report(video_path, model, summary_model, meta, frame_results, summary, elapsed) -> str:
+def write_report(video_path, model, summary_model, meta, frame_results, summary, elapsed,
+                 transcript: str = '', srt_path: Optional[str] = None) -> str:
     base, _ = os.path.splitext(video_path)
     report_path = f'{base}.analysis.md'
     lines = [
@@ -262,11 +359,13 @@ def write_report(video_path, model, summary_model, meta, frame_results, summary,
         '',
         summary,
         '',
-        '---',
-        '',
-        '## 逐帧描述 / Per-frame descriptions',
-        '',
     ]
+    if transcript:
+        lines += ['---', '', '## 音频转写 / Transcript', '']
+        if srt_path:
+            lines += [f'> 字幕文件 / SRT: `{os.path.basename(srt_path)}`', '']
+        lines += [transcript, '']
+    lines += ['---', '', '## 逐帧描述 / Per-frame descriptions', '']
     for idx, ts, desc in frame_results:
         lines += [f'### 帧 {idx} @ {ts:.1f}s', '', desc, '']
     with open(report_path, 'w', encoding='utf-8') as f:
