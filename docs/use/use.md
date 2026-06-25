@@ -203,4 +203,7 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 ```shell
 
 ./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-4.json --ollama-url http://localhost:11434
+
+# 更新版本，增加抽帧次数
+./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-5cout.json --ollama-url http://localhost:11434
 ```
