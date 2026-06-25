@@ -244,6 +244,8 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 #开始使用mlx直接运行，这里还是基于ollama，看起来也可以脱离ollama进行
 ./venv/bin/python scripts/video_tasks.py --backend mlx --summary-backend ollama
 
+# 16:33 再次进行，前面因为安装失败了。
+./venv/bin/python scripts/video_tasks.py --backend mlx --summary-backend ollama
 
 
 ```
