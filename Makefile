@@ -5,6 +5,10 @@ else
     DOCKER_COMPOSE := docker compose
 endif
 
+# Compose files now live under docker/. Reference the base file explicitly so
+# `make` works from the repository root.
+DOCKER_COMPOSE += -f docker/docker-compose.yaml
+
 install:
 	$(DOCKER_COMPOSE) up -d
 

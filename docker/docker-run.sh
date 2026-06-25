@@ -10,8 +10,12 @@ readonly CONTAINER="open-webui"
 readonly HOST_PORT="${OPEN_WEBUI_PORT:-3000}"
 readonly CONTAINER_PORT=8080
 
+# Build context is the repository root (one level up from this docker/ folder).
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+readonly REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." &>/dev/null && pwd)"
+
 echo "Building ${IMAGE} image..."
-docker build -t "$IMAGE" .
+docker build -t "$IMAGE" "$REPO_ROOT"
 
 echo "Stopping any existing ${CONTAINER} container..."
 docker stop "$CONTAINER" 2>/dev/null || true

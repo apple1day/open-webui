@@ -6,6 +6,10 @@ set -euo pipefail
 # Supports GPU auto-detection, configurable ports, data mounts, and Playwright.
 # ---------------------------------------------------------------------------
 
+# Resolve this script's own directory so compose files (now under docker/) are
+# referenced by absolute path regardless of the caller's working directory.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+
 readonly BOLD='\033[1m'
 readonly GREEN='\033[1;32m'
 readonly WHITE='\033[1;37m'
@@ -100,14 +104,14 @@ done
 # ── Drop mode ─────────────────────────────────────────────────────────────────
 
 if [[ "$drop_project" == true ]]; then
-  docker compose down --remove-orphans
+  docker compose -f "$SCRIPT_DIR/docker-compose.yaml" down --remove-orphans
   echo -e "${GREEN}${BOLD}Compose project stopped and cleaned up.${RESET}"
   exit 0
 fi
 
 # ── Build compose command ─────────────────────────────────────────────────────
 
-compose_files=("-f" "docker-compose.yaml")
+compose_files=("-f" "$SCRIPT_DIR/docker-compose.yaml")
 
 if [[ "$enable_gpu" == true ]]; then
   if ! [[ "$gpu_count" =~ ^([0-9]+|all)$ ]]; then
@@ -117,21 +121,21 @@ if [[ "$enable_gpu" == true ]]; then
   export OLLAMA_GPU_DRIVER
   OLLAMA_GPU_DRIVER=$(detect_gpu_driver)
   export OLLAMA_GPU_COUNT="$gpu_count"
-  compose_files+=("-f" "docker-compose.gpu.yaml")
+  compose_files+=("-f" "$SCRIPT_DIR/docker-compose.gpu.yaml")
 fi
 
 if [[ "$enable_api" == true ]]; then
   export OLLAMA_WEBAPI_PORT="$api_port"
-  compose_files+=("-f" "docker-compose.api.yaml")
+  compose_files+=("-f" "$SCRIPT_DIR/docker-compose.api.yaml")
 fi
 
 if [[ -n "$data_dir" ]]; then
   export OLLAMA_DATA_DIR="$data_dir"
-  compose_files+=("-f" "docker-compose.data.yaml")
+  compose_files+=("-f" "$SCRIPT_DIR/docker-compose.data.yaml")
 fi
 
 if [[ "$enable_playwright" == true ]]; then
-  compose_files+=("-f" "docker-compose.playwright.yaml")
+  compose_files+=("-f" "$SCRIPT_DIR/docker-compose.playwright.yaml")
 fi
 
 export OPEN_WEBUI_PORT="$webui_port"
