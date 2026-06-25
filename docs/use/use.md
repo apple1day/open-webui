@@ -101,7 +101,7 @@ USE_MYSQL=0 PULL_MODEL=1 ./start-video-analysis.sh
 | `model` | 视觉模型（必须能看图，如 `minicpm-v:latest` / `llava:latest`） |
 | `summary_model` | 汇总用文本模型；留空＝同 `model` |
 | `language` | `zh` / `en` 输出语言 |
-| `sample_mode` | 抽帧策略：`count`(固定张数) / `interval`(按时间跨度) / `auto`(默认,兼容旧行为) |
+| `sample_mode` | 抽帧策略：`count`(固定张数) / `interval`(按时间跨度) / `scene`(镜头切换检测) / `auto`(默认,兼容旧行为) |
 | `frame_interval` | 抽帧间隔（秒）。`interval` 模式下＝每隔几秒抽一帧；`auto` 下为"最密间隔" |
 | `max_frames` | 抽帧张数。`count`/`auto` 模式生效；安全上限 2000。**调大＝更细但更慢** |
 | `include_audio` | 是否转写音轨（声音/台词/旁白），默认 false |
@@ -121,7 +121,11 @@ USE_MYSQL=0 PULL_MODEL=1 ./start-video-analysis.sh
 |---|---|---|
 | `count` | 全片**均匀抽 `max_frames` 帧**（无视 `frame_interval`） | 想固定开销、快速预览 |
 | `interval` | **每 `frame_interval` 秒抽 1 帧**（无视 `max_frames`，长视频更完整） | 长视频、不想漏场景切换 |
+| `scene` | **镜头切换检测**：每 `scene_probe` 秒探测一次，HSV 直方图相关度低于 `scene_threshold` 即判为新镜头并抽帧 | 影视剧/多镜头，按"剧情切换"抽帧，不漏镜头也不浪费静止段 |
 | `auto` | ≤ `max_frames` 帧且不密于 `frame_interval`（旧默认行为） | 兼容、折中 |
+
+> `scene` 模式专属参数：`scene_probe`（探测间隔秒，默认 1.0，越小越细越慢）、
+> `scene_threshold`（0~1 相关度阈值，默认 0.6，**调小=更不敏感、关键帧更少**；调大=更敏感、关键帧更多）。受安全上限 2000 帧保护。
 
 例：1 小时视频「每分钟一帧」→ `"sample_mode": "interval", "frame_interval": 60`（约 60 帧）。
 帧越多越细，但逐帧调用模型，耗时随帧数近似线性增长（安全上限 2000 帧）。
@@ -232,7 +236,8 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
       "prompt": null, // 自定义逐帧提示词；`null` 用内置提示 |
       "save_report": true // | 是否在视频同目录生成 `<视频名>.analysis.md` |
     }
-    
+  
+./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-6.json 
     
 ```
 

@@ -54,6 +54,8 @@ DEFAULT_MAX_FRAMES = 16        # 单个视频默认抽帧数
 MAX_FRAMES_HARD_CAP = 2000     # 安全上限：可大幅调高 max_frames 以「时间换精度」（越多越慢越细）
 MAX_FRAME_EDGE = 768           # 长边缩放上限，控制 base64 体积
 DEFAULT_WHISPER_MODEL = 'base'  # faster-whisper 模型：tiny/base/small/medium/large-v3（越大越准越慢）
+DEFAULT_SCENE_THRESHOLD = 0.6   # scene 模式：HSV 直方图相关度阈值，低于它判为「镜头切换」（越小越不敏感、关键帧越少）
+DEFAULT_SCENE_PROBE = 1.0       # scene 模式：每隔多少秒探测一次（越小越细、越慢）
 SUPPORTED_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v', '.mpg', '.mpeg', '.wmv', '.ts'}
 
 
@@ -99,10 +101,41 @@ def probe_metadata(path: str) -> dict:
 # sample_mode:
 #   'count'    固定张数：全片均匀抽 max_frames 帧（无视 frame_interval）
 #   'interval' 时间跨度：每 frame_interval 秒抽 1 帧（长视频更完整，受硬上限保护）
+#   'scene'    镜头切换：每 scene_probe 秒探测一次，HSV 直方图相关度骤降即判为新镜头并抽帧
 #   'auto'     兼容旧行为：≤ max_frames 帧，且不密于 frame_interval
 # --------------------------------------------------------------------------- #
+def _detect_scene_timestamps(cap, duration: float, probe: float, threshold: float) -> list[float]:
+    """粗粒度探测镜头切换：返回判定为「新镜头」的时间戳列表。
+
+    做法：每 ``probe`` 秒取一帧，缩成小图算 HSV 色调-饱和度直方图，与上一帧做相关度比较；
+    相关度低于 ``threshold`` 说明画面构成发生明显变化（镜头切换/场景转换），记为关键帧。
+    纯 OpenCV，不引入额外依赖。
+    """
+    stamps: list[float] = []
+    prev = None
+    t = 0.0
+    while t < duration and len(stamps) < MAX_FRAMES_HARD_CAP:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            hist = cv2.calcHist([hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
+            cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+            if prev is None:
+                stamps.append(round(t, 2))  # 首帧必收
+            else:
+                corr = cv2.compareHist(prev, hist, cv2.HISTCMP_CORREL)
+                if corr < threshold:
+                    stamps.append(round(t, 2))  # 镜头切换
+            prev = hist
+        t += probe
+    return stamps
+
+
 def extract_frames(
-    path: str, frame_interval: float, max_frames: int, sample_mode: str = 'auto'
+    path: str, frame_interval: float, max_frames: int, sample_mode: str = 'auto',
+    scene_threshold: float = DEFAULT_SCENE_THRESHOLD, scene_probe: float = DEFAULT_SCENE_PROBE,
 ) -> list[tuple[float, str]]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -112,7 +145,11 @@ def extract_frames(
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration = (total_frames / fps) if fps > 0 else 0.0
 
-    if duration > 0:
+    if duration > 0 and sample_mode == 'scene':
+        timestamps = _detect_scene_timestamps(cap, duration, max(0.5, scene_probe), scene_threshold)
+        if not timestamps:
+            timestamps = [0.0]
+    elif duration > 0:
         if sample_mode == 'count':
             limit = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
             step = duration / limit
@@ -329,6 +366,8 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     interval = float(task.get('frame_interval', DEFAULT_FRAME_INTERVAL))
     max_frames = int(task.get('max_frames', DEFAULT_MAX_FRAMES))
     sample_mode = str(task.get('sample_mode') or defaults.get('sample_mode') or 'auto').lower()
+    scene_threshold = float(task.get('scene_threshold', defaults.get('scene_threshold', DEFAULT_SCENE_THRESHOLD)))
+    scene_probe = float(task.get('scene_probe', defaults.get('scene_probe', DEFAULT_SCENE_PROBE)))
     save_report = task.get('save_report', True)
     custom_prompt = task.get('prompt')
     include_audio = bool(task.get('include_audio', defaults.get('include_audio', False)))
@@ -359,9 +398,11 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         _c('INFO', f'抽帧方式：时间跨度，每 {interval:g}s 一帧（安全上限 {MAX_FRAMES_HARD_CAP} 帧）')
     elif sample_mode == 'count':
         _c('INFO', f'抽帧方式：固定张数，全片均匀 {max_frames} 帧')
+    elif sample_mode == 'scene':
+        _c('INFO', f'抽帧方式：镜头切换检测（每 {scene_probe:g}s 探测，相关度<{scene_threshold:g} 判为新镜头，上限 {MAX_FRAMES_HARD_CAP} 帧）')
     else:
         _c('INFO', f'抽帧方式：自动（≤{max_frames} 帧且不密于 {interval:g}s）')
-    frames = extract_frames(video_path, max(0.5, interval), max_frames, sample_mode)
+    frames = extract_frames(video_path, max(0.5, interval), max_frames, sample_mode, scene_threshold, scene_probe)
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
         return

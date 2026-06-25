@@ -11,7 +11,7 @@
   "stream_log": true,
   "tasks": [
     {
-      "video_path": "/Users/even/mine/some/FC2-PPV-1035070.mp4",
+      "video_path": "/Users/even/mine/some/IMG_2526.MP4",
       "model": "minicpm-v:latest",
       "summary_model": "qwen2.5:14b",
       "language": "zh",
@@ -23,7 +23,7 @@
       "prompt": null,
       "save_report": true
     },{
-      "video_path": "/Users/even/mine/some/FC2-PPV-1876178.mp4",
+      "video_path": "/Users/even/mine/some/IMG_2528.MP4",
       "model": "minicpm-v:latest",
       "summary_model": "qwen2.5:14b",
       "language": "zh",
@@ -35,7 +35,7 @@
       "prompt": null,
       "save_report": true
     },{
-      "video_path": "/Users/even/mine/some/FC2-PPV-2763672_1 00_00_00-00_27_00.mp4",
+      "video_path": "/Users/even/mine/some/IMG_2530.MP4",
       "model": "minicpm-v:latest",
       "summary_model": "qwen2.5:14b",
       "language": "zh",
