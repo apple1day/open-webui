@@ -1,0 +1,45 @@
+{
+  "ollama_url": "http://localhost:11434",
+  "default_model": "minicpm-v:latest",
+  "default_summary_model": "qwen2.5:14b",
+  "language": "zh",
+  "include_audio": false,
+  "whisper_model": "base",
+  "whisper_language": null,
+  "tasks": [
+    {
+      "video_path": "/Users/even/mine/some/FC2-PPV-1035070.mp4",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "frame_interval": 5,
+      "max_frames": 16,
+      "include_audio": true,
+      "whisper_model": "base",
+      "prompt": null,
+      "save_report": true
+    },{
+      "video_path": "/Users/even/mine/some/FC2-PPV-1876178.mp4",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "frame_interval": 5,
+      "max_frames": 16,
+      "include_audio": true,
+      "whisper_model": "base",
+      "prompt": null,
+      "save_report": true
+    },{
+      "video_path": "/Users/even/mine/some/FC2-PPV-2763672_1 00_00_00-00_27_00.mp4",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "frame_interval": 5,
+      "max_frames": 16,
+      "include_audio": true,
+      "whisper_model": "base",
+      "prompt": null,
+      "save_report": true
+    }
+  ]
+}
