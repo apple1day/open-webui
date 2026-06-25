@@ -175,6 +175,22 @@ fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/venv/bin/activate"
 
+# ── 可选：启动时自动执行预定义视频分析任务 ────────────────────────────────────
+# 直连本机 Ollama，无需后端/登录；任务写在 video-tasks.json 里。
+#   RUN_VIDEO_TASKS=1 ./start-video-analysis.sh            # 启动时自动跑一遍
+#   也可单独运行：venv/bin/python scripts/video_tasks.py
+if [[ "${RUN_VIDEO_TASKS:-0}" == "1" ]]; then
+  TASKS_FILE="${VIDEO_TASKS_FILE:-$SCRIPT_DIR/video-tasks.json}"
+  if [[ -f "$TASKS_FILE" ]]; then
+    c_info "执行预定义视频分析任务: $TASKS_FILE"
+    "$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/scripts/video_tasks.py" \
+      --config "$TASKS_FILE" --ollama-url "$OLLAMA_URL" \
+      || c_warn "部分视频任务执行出错，详见上方输出"
+  else
+    c_warn "RUN_VIDEO_TASKS=1 但未找到任务文件: $TASKS_FILE"
+  fi
+fi
+
 # 数据库：默认 SQLite，免外部依赖；USE_MYSQL=1 时沿用 .env 的 MySQL
 if [[ "$USE_MYSQL" != "1" ]]; then
   export DATABASE_URL="sqlite:///${SCRIPT_DIR}/backend/data/webui.db"

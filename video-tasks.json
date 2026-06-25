@@ -1,0 +1,18 @@
+{
+  "ollama_url": "http://localhost:11434",
+  "default_model": "minicpm-v:latest",
+  "default_summary_model": "qwen2.5:14b",
+  "language": "zh",
+  "tasks": [
+    {
+      "video_path": "/Users/even/mine/some/72.mp4",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "frame_interval": 5,
+      "max_frames": 16,
+      "prompt": null,
+      "save_report": true
+    }
+  ]
+}
