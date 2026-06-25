@@ -7,6 +7,8 @@
   "whisper_model": "base",
   "whisper_language": null,
   "sample_mode": "auto",
+  "output_dir": null,
+  "stream_log": true,
   "tasks": [
     {
       "video_path": "/Users/even/mine/some/FC2-PPV-1035070.mp4",

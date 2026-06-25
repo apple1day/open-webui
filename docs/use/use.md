@@ -108,10 +108,12 @@ USE_MYSQL=0 PULL_MODEL=1 ./start-video-analysis.sh
 | `whisper_model` | 语音模型：`tiny`/`base`/`small`/`medium`/`large-v3`（越大越准越慢，中文建议 `small`+） |
 | `whisper_language` | 强制语种（如 `zh`/`en`）；`null` 自动检测 |
 | `prompt` | 自定义逐帧提示词；`null` 用内置提示 |
-| `save_report` | 是否在视频同目录生成 `<视频名>.analysis.md` |
+| `save_report` | 是否生成 `<视频名>.analysis.md`（默认写到视频同目录，可被 `output_dir` 改写） |
+| `output_dir` | 报告/字幕输出目录。`null`＝写到视频同目录（旧行为）；填路径（支持 `~`，自动创建）＝统一写到该目录，仍用视频主名 |
+| `stream_log` | 是否在终端**实时**打印逐帧识别描述与汇总结果（默认 `true`） |
 
 要分析多个视频，往 `tasks` 数组里再加对象即可。顶层的 `default_*` / `include_audio` / `whisper_*` /
-`sample_mode` 为所有任务的默认值，单个任务里同名字段可覆盖。
+`sample_mode` / `output_dir` / `stream_log` 为所有任务的默认值，单个任务里同名字段可覆盖。
 
 #### 抽帧策略：固定张数 vs 时间跨度
 
@@ -206,4 +208,31 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 
 # 更新版本，增加抽帧次数
 ./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-5cout.json --ollama-url http://localhost:11434
+
+
+  "ollama_url": "http://localhost:11434",
+  "default_model": "minicpm-v:latest",
+  "default_summary_model": "qwen2.5:14b",  
+  "language": "zh",
+  "include_audio": false,  //  是否转写音轨（声音/台词/旁白），默认 false |
+  "whisper_model": "base",
+  "whisper_language": null,
+  "sample_mode": "auto",
+  "tasks": [
+    {
+      "video_path": "/Users/even/mine/some/FC2-PPV-1035070.mp4",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "sample_mode": "interval", // | 抽帧策略：`count`(固定张数) / `interval`(按时间跨度) / `auto`(默认,兼容旧行为) |
+      "frame_interval": 60, // 抽帧间隔（秒）。`interval` 模式下＝每隔几秒抽一帧；`auto` 下为"最密间隔" |
+      "max_frames": 16, // 抽帧张数。`count`/`auto` 模式生效；安全上限 2000。**调大＝更细但更慢** |
+      "include_audio": true, // 是否转写音轨（声音/台词/旁白），默认 false |
+      "whisper_model": "small", // 语音模型：`tiny`/`base`/`small`/`medium`/`large-v3`（越大越准越慢，中文建议 `small`+） 
+      "prompt": null, // 自定义逐帧提示词；`null` 用内置提示 |
+      "save_report": true // | 是否在视频同目录生成 `<视频名>.analysis.md` |
+    }
+    
+    
 ```
+

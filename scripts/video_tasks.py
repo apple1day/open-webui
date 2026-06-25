@@ -161,20 +161,54 @@ def extract_frames(
 # --------------------------------------------------------------------------- #
 # 3) 调用 Ollama /api/chat（标准库 urllib，同步）
 # --------------------------------------------------------------------------- #
-def ollama_chat(ollama_url: str, model: str, content: str, images: Optional[list[str]] = None) -> str:
+def ollama_chat(
+    ollama_url: str,
+    model: str,
+    content: str,
+    images: Optional[list[str]] = None,
+    *,
+    stream: bool = False,
+    on_delta=None,
+) -> str:
+    """调用 Ollama /api/chat。
+
+    - ``stream=False``：一次性返回完整文本（默认）。
+    - ``stream=True``：边收边吐，每收到一段增量文本就回调 ``on_delta(delta)``，
+      可用于把模型输出**实时**打印到终端；最终仍返回拼接后的完整文本。
+    """
     message: dict = {'role': 'user', 'content': content}
     if images:
         message['images'] = images
-    payload = {'model': model, 'messages': [message], 'stream': False, 'options': {'temperature': 0.2}}
+    payload = {'model': model, 'messages': [message], 'stream': bool(stream), 'options': {'temperature': 0.2}}
     req = urllib.request.Request(
         f'{ollama_url.rstrip("/")}/api/chat',
         data=json.dumps(payload).encode('utf-8'),
         headers={'Content-Type': 'application/json'},
         method='POST',
     )
+    if not stream:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        return (data.get('message') or {}).get('content', '') or ''
+
+    parts: list[str] = []
     with urllib.request.urlopen(req, timeout=600) as resp:
-        data = json.loads(resp.read().decode('utf-8'))
-    return (data.get('message') or {}).get('content', '') or ''
+        for raw in resp:  # Ollama 流式为按行的 NDJSON
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line.decode('utf-8'))
+            except Exception:
+                continue
+            delta = (obj.get('message') or {}).get('content', '') or ''
+            if delta:
+                parts.append(delta)
+                if on_delta:
+                    on_delta(delta)
+            if obj.get('done'):
+                break
+    return ''.join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,12 +260,23 @@ def transcribe_audio(video_path: str, whisper_model: str, language: Optional[str
     return full_text, seg_list
 
 
-def write_srt(video_path: str, segments) -> Optional[str]:
-    """把转写分段写成与视频同名的 .srt 字幕文件。"""
+def _out_base(video_path: str, output_dir: Optional[str]) -> str:
+    """计算输出文件的「无扩展名基准路径」。
+
+    - ``output_dir`` 为空：沿用旧行为，与视频同目录、同主名。
+    - ``output_dir`` 非空：写到该目录下，仍用视频主名（不含扩展名）。
+    """
+    base, _ = os.path.splitext(video_path)
+    if output_dir:
+        return os.path.join(output_dir, os.path.basename(base))
+    return base
+
+
+def write_srt(video_path: str, segments, output_dir: Optional[str] = None) -> Optional[str]:
+    """把转写分段写成与视频同名的 .srt 字幕文件（可指定 output_dir）。"""
     if not segments:
         return None
-    base, _ = os.path.splitext(video_path)
-    srt_path = f'{base}.srt'
+    srt_path = f'{_out_base(video_path, output_dir)}.srt'
     with open(srt_path, 'w', encoding='utf-8') as f:
         for i, (start, end, text) in enumerate(segments, 1):
             f.write(f'{i}\n{_srt_ts(start)} --> {_srt_ts(end)}\n{text}\n\n')
@@ -289,6 +334,13 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     include_audio = bool(task.get('include_audio', defaults.get('include_audio', False)))
     whisper_model = task.get('whisper_model') or defaults.get('whisper_model') or DEFAULT_WHISPER_MODEL
     whisper_language = task.get('whisper_language') or defaults.get('whisper_language')
+    # 报告/字幕输出目录：留空＝写到视频同目录（旧行为）；填了就写到该目录（自动创建）。
+    output_dir = task.get('output_dir') or defaults.get('output_dir')
+    if output_dir:
+        output_dir = os.path.expanduser(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+    # 是否把逐帧描述与汇总结果实时打印到终端（默认开启）。
+    stream_log = bool(task.get('stream_log', defaults.get('stream_log', True)))
 
     if not model:
         _c('ERR', f'未指定视觉模型（task.model 或 default_model）：{video_path}')
@@ -319,12 +371,24 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     fp = frame_prompt(language, custom_prompt)
     frame_results: list[tuple[int, float, str]] = []
     for i, (ts, b64) in enumerate(frames):
+        _c('INFO', f'  帧 {i + 1}/{len(frames)} @ {ts:.1f}s')
         try:
-            desc = ollama_chat(ollama_url, model, fp, images=[b64]).strip()
+            if stream_log:
+                # 流式：边识别边把描述吐到终端，实时可见
+                sys.stdout.write('\033[2m      ')  # 暗色缩进前缀
+                sys.stdout.flush()
+                desc = ollama_chat(
+                    ollama_url, model, fp, images=[b64],
+                    stream=True, on_delta=lambda d: (sys.stdout.write(d), sys.stdout.flush()),
+                ).strip()
+                sys.stdout.write('\033[0m\n')
+                sys.stdout.flush()
+            else:
+                desc = ollama_chat(ollama_url, model, fp, images=[b64]).strip()
         except Exception as exc:
             desc = f'(帧识别失败：{exc})'
+            _c('WARN', f'  帧 {i + 1} 识别失败：{exc}')
         frame_results.append((i, ts, desc))
-        _c('INFO', f'  帧 {i + 1}/{len(frames)} @ {ts:.1f}s')
 
     # 3.5) 可选：音频转写（faster-whisper）
     transcript, segments, srt_path = '', [], None
@@ -334,7 +398,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         if transcript:
             _c('OK', f'音频转写完成（{len(transcript)} 字，{len(segments)} 段）')
             if save_report:
-                srt_path = write_srt(video_path, segments)
+                srt_path = write_srt(video_path, segments, output_dir=output_dir)
                 if srt_path:
                     _c('OK', f'字幕已导出 → {srt_path}')
         else:
@@ -347,7 +411,17 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     if transcript:
         fuse_input += f'\n\n## 音频转写\n{transcript}'
     try:
-        summary = ollama_chat(ollama_url, summary_model, fuse_input).strip()
+        if stream_log:
+            sys.stdout.write('\033[2m')  # 暗色显示汇总过程
+            sys.stdout.flush()
+            summary = ollama_chat(
+                ollama_url, summary_model, fuse_input,
+                stream=True, on_delta=lambda d: (sys.stdout.write(d), sys.stdout.flush()),
+            ).strip()
+            sys.stdout.write('\033[0m\n')
+            sys.stdout.flush()
+        else:
+            summary = ollama_chat(ollama_url, summary_model, fuse_input).strip()
     except Exception as exc:
         summary = f'(汇总失败：{exc})'
 
@@ -358,15 +432,15 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     if save_report:
         report_path = write_report(
             video_path, model, summary_model, meta, frame_results, summary, elapsed,
-            transcript=transcript, srt_path=srt_path,
+            transcript=transcript, srt_path=srt_path, output_dir=output_dir,
         )
         _c('OK', f'报告已保存 → {report_path}')
 
 
 def write_report(video_path, model, summary_model, meta, frame_results, summary, elapsed,
-                 transcript: str = '', srt_path: Optional[str] = None) -> str:
-    base, _ = os.path.splitext(video_path)
-    report_path = f'{base}.analysis.md'
+                 transcript: str = '', srt_path: Optional[str] = None,
+                 output_dir: Optional[str] = None) -> str:
+    report_path = f'{_out_base(video_path, output_dir)}.analysis.md'
     lines = [
         '# 视频离线分析报告 / Video Analysis Report',
         '',
