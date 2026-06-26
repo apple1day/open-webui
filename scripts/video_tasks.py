@@ -540,6 +540,13 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         os.makedirs(output_dir, exist_ok=True)
     # 是否把逐帧描述与汇总结果实时打印到终端（默认开启）。
     stream_log = bool(task.get('stream_log', defaults.get('stream_log', True)))
+    # 批量场景：若同名报告已存在则跳过，便于「增量」分析新视频。
+    skip_existing = bool(task.get('skip_existing', defaults.get('skip_existing', False)))
+    if skip_existing and save_report:
+        _existing = f'{_out_base(video_path, output_dir)}.analysis.md'
+        if os.path.isfile(_existing):
+            _c('INFO', f'已存在报告，跳过：{_existing}')
+            return
 
     if not model:
         _c('ERR', f'未指定视觉模型（task.model 或 default_model）：{video_path}')
@@ -688,6 +695,53 @@ def write_report(video_path, model, summary_model, meta, frame_results, summary,
 # --------------------------------------------------------------------------- #
 # 入口
 # --------------------------------------------------------------------------- #
+def _iter_videos(directory: str, recursive: bool = False) -> list[str]:
+    """列出目录下所有「支持的」视频文件（按路径排序）。recursive=True 时含子目录。"""
+    out: list[str] = []
+    if recursive:
+        for root, _dirs, files in os.walk(directory):
+            for fn in files:
+                if os.path.splitext(fn)[1].lower() in SUPPORTED_EXTS:
+                    out.append(os.path.join(root, fn))
+    else:
+        for fn in os.listdir(directory):
+            p = os.path.join(directory, fn)
+            if os.path.isfile(p) and os.path.splitext(fn)[1].lower() in SUPPORTED_EXTS:
+                out.append(p)
+    return sorted(out)
+
+
+def _expand_tasks(tasks: list[dict]) -> list[dict]:
+    """把含 ``video_dir`` 的任务展开成「目录下每个视频一个任务」。
+
+    - ``video_dir``：要扫描的目录（绝对路径或 ~ 开头）。
+    - ``recursive``：是否递归子目录（默认 False）。
+    - 其余键（model / sample_mode / backend / include_audio 等）原样继承到每个视频。
+    - 不含 ``video_dir`` 的任务（用 ``video_path``）原样保留，向后兼容。
+    """
+    expanded: list[dict] = []
+    for t in tasks:
+        vdir = t.get('video_dir')
+        if not vdir:
+            expanded.append(t)
+            continue
+        vdir = os.path.expanduser(vdir)
+        if not os.path.isdir(vdir):
+            _c('ERR', f'目录不存在：{vdir}')
+            continue
+        recursive = bool(t.get('recursive', False))
+        videos = _iter_videos(vdir, recursive)
+        if not videos:
+            _c('WARN', f'目录中未找到支持的视频：{vdir}')
+            continue
+        _c('INFO', f'目录 {vdir} 命中 {len(videos)} 个视频{"（含子目录）" if recursive else ""}')
+        for vp in videos:
+            nt = {k: v for k, v in t.items() if k not in ('video_dir', 'recursive')}
+            nt['video_path'] = vp
+            expanded.append(nt)
+    return expanded
+
+
 def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     default_config = os.path.normpath(os.path.join(here, '..', 'video-tasks.json'))
@@ -703,6 +757,12 @@ def main() -> int:
                         help=f'MLX 视觉模型 id（默认 {DEFAULT_MLX_VLM_MODEL}）')
     parser.add_argument('--mlx-summary-model', default=None,
                         help=f'MLX 文本汇总模型 id（默认 {DEFAULT_MLX_LM_MODEL}）')
+    parser.add_argument('--video-dir', default=None,
+                        help='分析该目录下的所有视频（忽略配置里的 tasks，按全局默认参数批量跑）')
+    parser.add_argument('--recursive', action='store_true',
+                        help='配合 --video-dir：递归扫描子目录')
+    parser.add_argument('--skip-existing', action='store_true',
+                        help='跳过已生成同名 .analysis.md 报告的视频（增量分析）')
     args = parser.parse_args()
 
     if not os.path.isfile(args.config):
@@ -721,11 +781,24 @@ def main() -> int:
         cfg['mlx_model'] = args.mlx_model
     if args.mlx_summary_model:
         cfg['mlx_summary_model'] = args.mlx_summary_model
+    if args.skip_existing:
+        cfg['skip_existing'] = True
 
     ollama_url = args.ollama_url or cfg.get('ollama_url') or os.getenv('OLLAMA_BASE_URL') or 'http://localhost:11434'
-    tasks = cfg.get('tasks', [])
+
+    # 任务来源：--video-dir 优先（扫描整目录），否则用配置里的 tasks。
+    if args.video_dir:
+        tasks = [{'video_dir': args.video_dir, 'recursive': args.recursive}]
+    else:
+        tasks = cfg.get('tasks', [])
     if not tasks:
-        _c('WARN', 'video-tasks.json 中没有任务（tasks 为空），跳过。')
+        _c('WARN', 'video-tasks.json 中没有任务（tasks 为空），且未指定 --video-dir，跳过。')
+        return 0
+
+    # 把含 video_dir 的任务展开成「每个视频一个任务」
+    tasks = _expand_tasks(tasks)
+    if not tasks:
+        _c('WARN', '展开后没有可执行的视频任务，跳过。')
         return 0
 
     # 计算每个任务的有效后端，判断是否真的需要连 Ollama
@@ -747,7 +820,8 @@ def main() -> int:
     else:
         _c('INFO', f'共 {len(tasks)} 个视频任务，全部使用 MLX 后端（跳过 Ollama 探活）。')
 
-    for task in tasks:
+    for i, task in enumerate(tasks, 1):
+        _c('INFO', f'==== 任务 {i}/{len(tasks)} ====')
         try:
             run_task(task, cfg, ollama_url)
         except Exception as exc:

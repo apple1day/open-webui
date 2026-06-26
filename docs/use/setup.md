@@ -159,6 +159,48 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 | `scene` | 镜头切换检测，画面骤变处抽帧 |
 | `auto` | ≤ `max_frames` 帧且不密于 `frame_interval` |
 
+### 8.3 批量分析整个目录
+
+无需逐条写 `video_path`，可直接指定一个目录，自动分析其中所有支持的视频，全局默认参数（模型 / 抽帧 / 后端等）自动套用到每个视频。
+
+CLI 参数：
+
+| 参数 | 作用 |
+|---|---|
+| `--video-dir DIR` | 分析该目录下所有视频（忽略配置里的 tasks，按全局默认参数批量跑） |
+| `--recursive` | 配合 `--video-dir`，递归扫描子目录 |
+| `--skip-existing` | 跳过已生成同名 `.analysis.md` 的视频（**增量分析**，断点续跑） |
+
+```bash
+# 分析整个目录（视觉走 MLX、汇总走 Ollama、增量跳过已完成）
+./venv/bin/python scripts/video_tasks.py \
+  --video-dir /绝对路径/视频目录 \
+  --backend mlx --summary-backend ollama \
+  --skip-existing
+```
+
+也可写进 `video-tasks.json`（任务级 `video_dir` / `recursive`，或全局 `skip_existing`）：
+
+```json
+{
+  "backend": "mlx",
+  "summary_backend": "ollama",
+  "default_summary_model": "qwen2.5:14b",
+  "sample_mode": "count",
+  "max_frames": 6,
+  "skip_existing": true,
+  "tasks": [
+    { "video_dir": "/绝对路径/视频目录", "recursive": false }
+  ]
+}
+```
+
+> 批量提示：
+> - 视频很多时整体耗时很长，强烈建议加 `--skip-existing` 做增量，中断后重跑只补未完成的。
+> - 提速可用 `sample_mode=count` + 较小 `max_frames`（如 4~6），或换 2B 视觉模型 `mlx-community/Qwen2-VL-2B-Instruct-4bit`。
+> - 想集中管理报告，设 `output_dir` 把所有 `.analysis.md` 写到同一目录。
+> - 执行时终端会显示 `==== 任务 i/总数 ====` 进度。
+
 ---
 
 ## 9. 使用 MLX 后端（Apple Silicon 原生，可选）
@@ -270,4 +312,5 @@ USE_MYSQL=0 ./start-video-analysis.sh      # 用 SQLite
 # 离线视频分析
 ./venv/bin/python scripts/video_tasks.py                                    # Ollama
 ./venv/bin/python scripts/video_tasks.py --backend mlx --summary-backend ollama  # MLX 视觉
+./venv/bin/python scripts/video_tasks.py --video-dir /路径/目录 --backend mlx --summary-backend ollama --skip-existing  # 批量整目录(增量)
 ```
