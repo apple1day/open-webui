@@ -9,7 +9,7 @@
   "sample_mode": "auto",
   "tasks": [
     {
-      "video_path": "/Users/even/mine/some/72.mp4",
+      "video_path": "/data/workspace/data/1.mp4",
       "model": "minicpm-v:latest",
       "summary_model": "qwen2.5:14b",
       "language": "zh",
