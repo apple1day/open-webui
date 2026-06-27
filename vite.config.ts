@@ -23,6 +23,18 @@ export default defineConfig({
 	build: {
 		sourcemap: true
 	},
+	server: {
+		// 监听所有网卡，供局域网同事访问
+		host: true,
+		// Vite 5 默认会拦截非 localhost/IP 的 Host 头（否则用域名访问会报
+		// "Blocked request. This host is not allowed."）。这里放行内网域名。
+		allowedHosts: [
+			'jiayinghou-any9.devcloud.woa.com',
+			'.devcloud.woa.com',
+			'.woa.com',
+			'localhost'
+		]
+	},
 	worker: {
 		format: 'es'
 	},

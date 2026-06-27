@@ -25,11 +25,12 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
 import aiohttp
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -62,8 +63,10 @@ SUPPORTED_VIDEO_EXTS = {
 # A vision model can only digest a limited number of frames per request.
 DEFAULT_FRAME_INTERVAL = 5.0  # seconds between sampled frames
 DEFAULT_MAX_FRAMES = 16  # hard cap on frames per video
+DEFAULT_MIN_FRAMES = 20  # ensure at least this many frames (adaptive to duration); 0 = off
 MAX_FRAME_EDGE = 768  # downscale long edge to keep base64 payloads small
 DEFAULT_CONCURRENCY = 3  # parallel vision requests against Ollama
+FRAMES_HARD_CAP = 64  # absolute upper bound on frames per request (payload/VRAM guard)
 
 # Progress callback: receives a dict event. May be None.
 ProgressCb = Optional[Callable[[dict], Awaitable[None]]]
@@ -81,6 +84,7 @@ class VideoAnalyzeForm(BaseModel):
     prompt: Optional[str] = None  # custom per-frame instruction
     frame_interval: float = DEFAULT_FRAME_INTERVAL
     max_frames: int = DEFAULT_MAX_FRAMES
+    min_frames: int = DEFAULT_MIN_FRAMES  # adaptive floor so short clips aren't 1-frame
     concurrency: int = DEFAULT_CONCURRENCY  # parallel vision requests
     language: str = 'zh'  # 'zh' | 'en' output language
     include_audio: bool = False  # transcribe audio track via faster-whisper
@@ -182,7 +186,7 @@ def _resolve_video_path(video_path: str) -> str:
 # Frame extraction (OpenCV, runs in a worker thread)
 # --------------------------------------------------------------------------- #
 def _extract_frames_sync(
-    path: str, frame_interval: float, max_frames: int
+    path: str, frame_interval: float, max_frames: int, min_frames: int = 0
 ) -> tuple[list[tuple[float, str]], float, int]:
     """Sample frames and return ``([(timestamp, base64_jpeg)], duration, total_frames)``.
 
@@ -211,6 +215,16 @@ def _extract_frames_sync(
         step = max(1, (total_frames or max_frames) // max_frames)
         timestamps = [i for i in range(0, total_frames or max_frames, step)][:max_frames]
         timestamps = [float(i) for i in timestamps]
+
+    # Guarantee a minimum number of frames for short videos so the model gets
+    # enough context (e.g. a 10s clip shouldn't be summarized from a single frame).
+    if min_frames and duration > 0 and len(timestamps) < min_frames:
+        target = min(int(min_frames), FRAMES_HARD_CAP)
+        if total_frames > 0:
+            target = min(target, total_frames)
+        if target > len(timestamps):
+            even_step = duration / target
+            timestamps = [round(i * even_step, 2) for i in range(target)]
 
     results: list[tuple[float, str]] = []
     for ts in timestamps:
@@ -359,7 +373,8 @@ async def _run_analysis(
         _extract_frames_sync,
         path,
         max(0.5, form_data.frame_interval),
-        max(1, min(form_data.max_frames, 64)),
+        max(1, min(form_data.max_frames, FRAMES_HARD_CAP)),
+        max(0, min(form_data.min_frames, FRAMES_HARD_CAP)),
     )
     if not frames:
         raise HTTPException(status_code=422, detail='No frames could be decoded from the video')
@@ -471,6 +486,7 @@ async def health(user=Depends(get_verified_user)) -> dict:
         'defaults': {
             'frame_interval': DEFAULT_FRAME_INTERVAL,
             'max_frames': DEFAULT_MAX_FRAMES,
+            'min_frames': DEFAULT_MIN_FRAMES,
             'concurrency': DEFAULT_CONCURRENCY,
         },
     }
@@ -591,3 +607,423 @@ def _write_report(
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
     return report_path
+
+
+# --------------------------------------------------------------------------- #
+# Batch / directory analysis
+# ---------------------------------------------------------------------------
+# Drop a directory in (from the web UI), the backend scans it for supported
+# videos and analyzes them one-by-one in a background task. The UI polls
+# ``GET /batch/{job_id}`` to render per-video status, overall progress and the
+# per-video report — no login-less script needed, fully offline.
+# --------------------------------------------------------------------------- #
+# In-memory job registry. Survives as long as the backend process lives.
+_BATCH_JOBS: "dict[str, dict]" = {}
+_BATCH_JOBS_MAX = 20  # keep only the most recent N jobs to bound memory
+
+
+class BatchAnalyzeForm(BaseModel):
+    """Payload for POST /batch — analyze every supported video in a directory."""
+
+    directory: str  # absolute directory path on the server
+    model: str  # local Ollama vision model id (must support images)
+    summary_model: Optional[str] = None
+    prompt: Optional[str] = None
+    frame_interval: float = DEFAULT_FRAME_INTERVAL
+    max_frames: int = DEFAULT_MAX_FRAMES
+    min_frames: int = DEFAULT_MIN_FRAMES
+    concurrency: int = DEFAULT_CONCURRENCY
+    language: str = 'zh'
+    include_audio: bool = False
+    whisper_model: Optional[str] = None
+    save_report: bool = True
+    ollama_url: Optional[str] = None
+    recursive: bool = False  # walk sub-directories too
+    skip_existing: bool = True  # skip videos that already have <name>.analysis.md
+
+    model_config = ConfigDict(extra='allow')
+
+
+def _scan_videos(directory: str, recursive: bool) -> list[str]:
+    """Return a sorted list of supported video files under ``directory``."""
+    directory = os.path.expanduser(directory)
+    if not os.path.isdir(directory):
+        raise HTTPException(status_code=404, detail=f'Directory not found: {directory}')
+
+    found: list[str] = []
+    if recursive:
+        for root, _dirs, files in os.walk(directory):
+            for fn in files:
+                if os.path.splitext(fn)[1].lower() in SUPPORTED_VIDEO_EXTS:
+                    found.append(os.path.join(root, fn))
+    else:
+        for fn in os.listdir(directory):
+            p = os.path.join(directory, fn)
+            if os.path.isfile(p) and os.path.splitext(fn)[1].lower() in SUPPORTED_VIDEO_EXTS:
+                found.append(p)
+    return sorted(found)
+
+
+def _public_job(job: dict) -> dict:
+    """Serialize a job for the API (kept JSON-friendly)."""
+    return {
+        'id': job['id'],
+        'directory': job['directory'],
+        'status': job['status'],
+        'created': job['created'],
+        'finished': job.get('finished'),
+        'total': job['total'],
+        'completed': job['completed'],
+        'current': job.get('current'),
+        'items': job['items'],
+        'params': job.get('params', {}),
+    }
+
+
+def _prune_jobs() -> None:
+    if len(_BATCH_JOBS) <= _BATCH_JOBS_MAX:
+        return
+    # drop the oldest finished jobs first
+    finished = sorted(
+        (j for j in _BATCH_JOBS.values() if j['status'] in ('done', 'error', 'cancelled')),
+        key=lambda j: j.get('finished') or j['created'],
+    )
+    for j in finished:
+        if len(_BATCH_JOBS) <= _BATCH_JOBS_MAX:
+            break
+        _BATCH_JOBS.pop(j['id'], None)
+
+
+async def _run_batch(request: Request, job_id: str) -> None:
+    """Background worker: analyze each pending video in the job sequentially."""
+    job = _BATCH_JOBS.get(job_id)
+    if not job:
+        return
+
+    for item in job['items']:
+        if job.get('cancel'):
+            break
+        if item['status'] != 'pending':
+            continue
+
+        item['status'] = 'running'
+        item['started'] = time.time()
+        job['current'] = {'name': item['name'], 'path': item['path'], 'done': 0, 'total': 0}
+
+        form = VideoAnalyzeForm(
+            video_path=item['path'],
+            model=job['params']['model'],
+            summary_model=job['params'].get('summary_model'),
+            prompt=job['params'].get('prompt'),
+            frame_interval=job['params']['frame_interval'],
+            max_frames=job['params']['max_frames'],
+            min_frames=job['params'].get('min_frames', DEFAULT_MIN_FRAMES),
+            concurrency=job['params']['concurrency'],
+            language=job['params']['language'],
+            include_audio=job['params']['include_audio'],
+            whisper_model=job['params'].get('whisper_model'),
+            save_report=job['params']['save_report'],
+            ollama_url=job['params'].get('ollama_url'),
+        )
+
+        async def on_progress(event: dict) -> None:
+            stage = event.get('stage')
+            cur = job.get('current') or {}
+            if stage == 'extracted':
+                cur['total'] = event.get('sampled_frames', 0)
+            elif stage == 'frame':
+                cur['done'] = event.get('done', cur.get('done', 0))
+                cur['total'] = event.get('total', cur.get('total', 0))
+            job['current'] = cur
+
+        try:
+            result = await _run_analysis(request, form, on_progress=on_progress)
+            item['status'] = 'done'
+            item['report_path'] = result.report_path
+            item['summary'] = result.summary
+            item['elapsed'] = result.elapsed
+            item['sampled_frames'] = result.sampled_frames
+        except HTTPException as exc:
+            item['status'] = 'error'
+            item['error'] = str(exc.detail)
+        except Exception as exc:  # pragma: no cover
+            log.exception(exc)
+            item['status'] = 'error'
+            item['error'] = str(exc)
+        finally:
+            item['finished'] = time.time()
+            job['completed'] += 1
+
+    # mark any still-pending items as cancelled
+    if job.get('cancel'):
+        for item in job['items']:
+            if item['status'] == 'pending':
+                item['status'] = 'cancelled'
+        job['status'] = 'cancelled'
+    else:
+        job['status'] = 'done'
+    job['current'] = None
+    job['finished'] = time.time()
+
+
+@router.post('/batch/scan')
+async def scan_directory(
+    request: Request,
+    form_data: BatchAnalyzeForm,
+    user=Depends(get_verified_user),
+) -> dict:
+    """Preview which videos a directory contains (no analysis yet)."""
+    videos = _scan_videos(form_data.directory, form_data.recursive)
+    items = []
+    for p in videos:
+        base, _ = os.path.splitext(p)
+        analyzed = os.path.exists(f'{base}.analysis.md')
+        items.append({'path': p, 'name': os.path.basename(p), 'analyzed': analyzed})
+    return {
+        'directory': os.path.expanduser(form_data.directory),
+        'count': len(items),
+        'analyzed': sum(1 for it in items if it['analyzed']),
+        'videos': items,
+    }
+
+
+@router.post('/batch')
+async def start_batch(
+    request: Request,
+    form_data: BatchAnalyzeForm,
+    user=Depends(get_verified_user),
+) -> dict:
+    """Scan a directory and start analyzing every supported video in background."""
+    if not request.app.state.config.ENABLE_OLLAMA_API:
+        raise HTTPException(status_code=503, detail=ERROR_MESSAGES.OLLAMA_API_DISABLED)
+
+    videos = _scan_videos(form_data.directory, form_data.recursive)
+    if not videos:
+        raise HTTPException(
+            status_code=404, detail='No supported video files found in the directory'
+        )
+
+    items = []
+    for p in videos:
+        base, _ = os.path.splitext(p)
+        existing = f'{base}.analysis.md'
+        analyzed = os.path.exists(existing)
+        skipped = bool(form_data.skip_existing and analyzed)
+        items.append(
+            {
+                'path': p,
+                'name': os.path.basename(p),
+                'status': 'skipped' if skipped else 'pending',
+                'report_path': existing if analyzed else None,
+                'summary': None,
+                'sampled_frames': None,
+                'elapsed': None,
+                'error': None,
+                'started': None,
+                'finished': None,
+            }
+        )
+
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        'id': job_id,
+        'directory': os.path.expanduser(form_data.directory),
+        'status': 'running',
+        'created': time.time(),
+        'finished': None,
+        'cancel': False,
+        'total': len(items),
+        'completed': sum(1 for it in items if it['status'] == 'skipped'),
+        'current': None,
+        'items': items,
+        'params': {
+            'model': form_data.model,
+            'summary_model': form_data.summary_model,
+            'prompt': form_data.prompt,
+            'frame_interval': form_data.frame_interval,
+            'max_frames': form_data.max_frames,
+            'min_frames': form_data.min_frames,
+            'concurrency': form_data.concurrency,
+            'language': form_data.language,
+            'include_audio': form_data.include_audio,
+            'whisper_model': form_data.whisper_model,
+            'save_report': form_data.save_report,
+            'ollama_url': form_data.ollama_url,
+            'recursive': form_data.recursive,
+            'skip_existing': form_data.skip_existing,
+        },
+    }
+    _BATCH_JOBS[job_id] = job
+    _prune_jobs()
+
+    asyncio.create_task(_run_batch(request, job_id))
+
+    return {
+        'job_id': job_id,
+        'total': job['total'],
+        'pending': sum(1 for it in items if it['status'] == 'pending'),
+        'skipped': job['completed'],
+    }
+
+
+@router.get('/batch')
+async def list_batches(user=Depends(get_verified_user)) -> dict:
+    """List recent batch jobs (compact, without per-video summaries)."""
+    jobs = []
+    for job in sorted(_BATCH_JOBS.values(), key=lambda j: j['created'], reverse=True):
+        jobs.append(
+            {
+                'id': job['id'],
+                'directory': job['directory'],
+                'status': job['status'],
+                'created': job['created'],
+                'finished': job.get('finished'),
+                'total': job['total'],
+                'completed': job['completed'],
+            }
+        )
+    return {'jobs': jobs}
+
+
+@router.get('/batch/{job_id}')
+async def get_batch(job_id: str, user=Depends(get_verified_user)) -> dict:
+    """Full state of one batch job — the UI polls this to render progress."""
+    job = _BATCH_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail='Batch job not found')
+    return _public_job(job)
+
+
+@router.post('/batch/{job_id}/cancel')
+async def cancel_batch(job_id: str, user=Depends(get_verified_user)) -> dict:
+    """Request cancellation; the current video finishes, the rest are skipped."""
+    job = _BATCH_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail='Batch job not found')
+    if job['status'] == 'running':
+        job['cancel'] = True
+    return {'id': job_id, 'status': job['status'], 'cancel': job['cancel']}
+
+
+# --------------------------------------------------------------------------- #
+# Upload-and-analyze: turn the server into a "video analysis agent".
+# ---------------------------------------------------------------------------
+# A colleague on another machine can POST their *local* video file and get a
+# report back — no server-filesystem access needed. The file is streamed to
+# UPLOAD_DIR/video_analysis, analyzed by the same offline pipeline, and the
+# structured report is returned in the response.
+#
+#   curl -X POST http://<host>:9102/api/v1/video/analyze/upload \
+#        -H "Authorization: Bearer sk-xxxx" \
+#        -F "file=@/local/path/clip.mp4" \
+#        -F "language=zh"
+# --------------------------------------------------------------------------- #
+async def _default_vision_model(request: Request) -> str:
+    """Pick a sensible local vision model when the caller doesn't specify one."""
+    try:
+        url, url_idx = _pick_ollama_url(request, None)
+        session = await get_session()
+        headers = {'Content-Type': 'application/json'}
+        key = get_api_key(url_idx, url, request.app.state.config.OLLAMA_API_CONFIGS)
+        if key:
+            headers['Authorization'] = f'Bearer {key}'
+        async with session.get(
+            f'{url}/api/tags',
+            headers=headers,
+            ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as r:
+            data = await r.json()
+        names = [m.get('model') for m in (data or {}).get('models', []) if m.get('model')]
+    except Exception:
+        names = []
+    # Prefer vision models known to load reliably on Ollama; keep mllama-based
+    # ones (e.g. llama3.2-vision) last since some Ollama builds fail to load them
+    # ("unknown model architecture: 'mllama'").
+    import re
+
+    preferred = [
+        r'minicpm-?v',
+        r'qwen.*vl',
+        r'llava|bakllava',
+        r'moondream',
+        r'cogvlm',
+        r'vl\b|vision',  # generic fallback (covers llama*-vision last)
+    ]
+    for pat in preferred:
+        for n in names:
+            if re.search(pat, n, re.I):
+                return n
+    if names:
+        return names[0]
+    raise HTTPException(status_code=503, detail='No local Ollama vision model available')
+
+
+@router.post('/analyze/upload', response_model=VideoAnalyzeResponse)
+async def analyze_uploaded_video(
+    request: Request,
+    file: UploadFile = File(...),
+    model: Optional[str] = Form(None),
+    summary_model: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+    language: str = Form('zh'),
+    frame_interval: float = Form(DEFAULT_FRAME_INTERVAL),
+    max_frames: int = Form(DEFAULT_MAX_FRAMES),
+    min_frames: int = Form(DEFAULT_MIN_FRAMES),
+    concurrency: int = Form(DEFAULT_CONCURRENCY),
+    include_audio: bool = Form(False),
+    whisper_model: Optional[str] = Form(None),
+    save_report: bool = Form(True),
+    keep_file: bool = Form(True),  # keep the uploaded file (and its report) on the server
+    user=Depends(get_verified_user),
+) -> VideoAnalyzeResponse:
+    """Accept an uploaded video, analyze it offline, and return the report."""
+    if not request.app.state.config.ENABLE_OLLAMA_API:
+        raise HTTPException(status_code=503, detail=ERROR_MESSAGES.OLLAMA_API_DISABLED)
+
+    ext = os.path.splitext(file.filename or '')[1].lower()
+    if ext not in SUPPORTED_VIDEO_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Unsupported video type "{ext}". Supported: {sorted(SUPPORTED_VIDEO_EXTS)}',
+        )
+
+    chosen_model = model or await _default_vision_model(request)
+
+    # Stream the upload to disk (avoid loading the whole file in memory).
+    dest_dir = os.path.join(UPLOAD_DIR, 'video_analysis')
+    os.makedirs(dest_dir, exist_ok=True)
+    safe_base = os.path.basename(file.filename or f'video{ext}')
+    dest = os.path.join(dest_dir, f'{uuid.uuid4().hex[:8]}_{safe_base}')
+
+    import shutil
+
+    try:
+        with open(dest, 'wb') as out:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, out, 1024 * 1024)
+    finally:
+        await file.close()
+
+    form = VideoAnalyzeForm(
+        video_path=dest,
+        model=chosen_model,
+        summary_model=summary_model,
+        prompt=prompt,
+        frame_interval=frame_interval,
+        max_frames=max_frames,
+        min_frames=min_frames,
+        concurrency=concurrency,
+        language=language,
+        include_audio=include_audio,
+        whisper_model=whisper_model,
+        save_report=save_report,
+    )
+    try:
+        result = await _run_analysis(request, form)
+    finally:
+        if not keep_file:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+    return result

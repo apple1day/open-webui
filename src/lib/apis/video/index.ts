@@ -7,6 +7,7 @@ export type VideoAnalyzeForm = {
 	prompt?: string;
 	frame_interval?: number;
 	max_frames?: number;
+	min_frames?: number;
 	concurrency?: number;
 	language?: string;
 	include_audio?: boolean;
@@ -140,3 +141,88 @@ export const analyzeVideoStream = async (
 
 	return result;
 };
+
+// --------------------------------------------------------------------------- //
+// Batch / directory analysis
+// --------------------------------------------------------------------------- //
+export type BatchAnalyzeForm = {
+	directory: string;
+	model: string;
+	summary_model?: string;
+	prompt?: string;
+	frame_interval?: number;
+	max_frames?: number;
+	min_frames?: number;
+	concurrency?: number;
+	language?: string;
+	include_audio?: boolean;
+	whisper_model?: string;
+	save_report?: boolean;
+	ollama_url?: string;
+	recursive?: boolean;
+	skip_existing?: boolean;
+};
+
+const _post = async (token: string, path: string, payload: any) => {
+	let error = null;
+	const res = await fetch(`${VIDEO_API_BASE_URL}${path}`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(payload)
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail ?? err;
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
+const _get = async (token: string, path: string) => {
+	let error = null;
+	const res = await fetch(`${VIDEO_API_BASE_URL}${path}`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail ?? err;
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
+/** Preview which videos a directory contains (no analysis). */
+export const scanVideoDirectory = async (token: string, payload: BatchAnalyzeForm) =>
+	_post(token, '/batch/scan', payload);
+
+/** Start a background batch job over a directory. Returns { job_id, total, ... }. */
+export const startVideoBatch = async (token: string, payload: BatchAnalyzeForm) =>
+	_post(token, '/batch', payload);
+
+/** Poll full state of one batch job. */
+export const getVideoBatch = async (token: string, jobId: string) =>
+	_get(token, `/batch/${jobId}`);
+
+/** List recent batch jobs (compact). */
+export const listVideoBatches = async (token: string) => _get(token, '/batch');
+
+/** Request cancellation of a running batch job. */
+export const cancelVideoBatch = async (token: string, jobId: string) =>
+	_post(token, `/batch/${jobId}/cancel`, {});

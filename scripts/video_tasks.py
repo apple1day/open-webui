@@ -51,6 +51,7 @@ except Exception as exc:  # pragma: no cover
 # --------------------------------------------------------------------------- #
 DEFAULT_FRAME_INTERVAL = 5.0   # 抽帧间隔（秒）
 DEFAULT_MAX_FRAMES = 16        # 单个视频默认抽帧数
+DEFAULT_MIN_FRAMES = 20        # 最少帧数保底：无论 sample_mode，最终抽帧数不少于它（受总帧数/硬上限约束）。0=不保底
 MAX_FRAMES_HARD_CAP = 2000     # 安全上限：可大幅调高 max_frames 以「时间换精度」（越多越慢越细）
 MAX_FRAME_EDGE = 768           # 长边缩放上限，控制 base64 体积
 DEFAULT_WHISPER_MODEL = 'base'  # faster-whisper 模型：tiny/base/small/medium/large-v3（越大越准越慢）
@@ -142,6 +143,7 @@ def _detect_scene_timestamps(cap, duration: float, probe: float, threshold: floa
 def extract_frames(
     path: str, frame_interval: float, max_frames: int, sample_mode: str = 'auto',
     scene_threshold: float = DEFAULT_SCENE_THRESHOLD, scene_probe: float = DEFAULT_SCENE_PROBE,
+    min_frames: int = 0,
 ) -> list[tuple[float, str]]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -178,6 +180,16 @@ def extract_frames(
         limit = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
         step = max(1, (total_frames or limit) // limit)
         timestamps = [float(i) for i in range(0, total_frames or limit, step)][:limit]
+
+    # —— 最少帧数保底：若按所选策略抽到的帧数不足 min_frames，则在全片均匀补到 min_frames ——
+    # 解决「短视频 + 大 interval」只抽 1 帧、信息不足的问题。受总帧数与硬上限约束。
+    if min_frames and duration > 0 and len(timestamps) < min_frames:
+        target = min(int(min_frames), MAX_FRAMES_HARD_CAP)
+        if total_frames > 0:
+            target = min(target, total_frames)
+        if target > len(timestamps):
+            even_step = duration / target
+            timestamps = [round(i * even_step, 2) for i in range(target)]
 
     out: list[tuple[float, str]] = []
     for ts in timestamps:
@@ -525,6 +537,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     language = task.get('language', defaults.get('language', 'zh'))
     interval = float(task.get('frame_interval', DEFAULT_FRAME_INTERVAL))
     max_frames = int(task.get('max_frames', DEFAULT_MAX_FRAMES))
+    min_frames = int(task.get('min_frames', defaults.get('min_frames', DEFAULT_MIN_FRAMES)))
     sample_mode = str(task.get('sample_mode') or defaults.get('sample_mode') or 'auto').lower()
     scene_threshold = float(task.get('scene_threshold', defaults.get('scene_threshold', DEFAULT_SCENE_THRESHOLD)))
     scene_probe = float(task.get('scene_probe', defaults.get('scene_probe', DEFAULT_SCENE_PROBE)))
@@ -564,15 +577,16 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
              f'分辨率 {meta["resolution"]} | {meta["fps"]}fps | 编码 {meta["codec"]} | {meta["size_mb"]}MB')
 
     # 2) 抽帧（按 sample_mode 选择抽样策略；可「时间换精度」）
+    _min_hint = f'，最少保底 {min_frames} 帧' if min_frames else ''
     if sample_mode == 'interval':
-        _c('INFO', f'抽帧方式：时间跨度，每 {interval:g}s 一帧（安全上限 {MAX_FRAMES_HARD_CAP} 帧）')
+        _c('INFO', f'抽帧方式：时间跨度，每 {interval:g}s 一帧（安全上限 {MAX_FRAMES_HARD_CAP} 帧{_min_hint}）')
     elif sample_mode == 'count':
         _c('INFO', f'抽帧方式：固定张数，全片均匀 {max_frames} 帧')
     elif sample_mode == 'scene':
-        _c('INFO', f'抽帧方式：镜头切换检测（每 {scene_probe:g}s 探测，相关度<{scene_threshold:g} 判为新镜头，上限 {MAX_FRAMES_HARD_CAP} 帧）')
+        _c('INFO', f'抽帧方式：镜头切换检测（每 {scene_probe:g}s 探测，相关度<{scene_threshold:g} 判为新镜头，上限 {MAX_FRAMES_HARD_CAP} 帧{_min_hint}）')
     else:
-        _c('INFO', f'抽帧方式：自动（≤{max_frames} 帧且不密于 {interval:g}s）')
-    frames = extract_frames(video_path, max(0.5, interval), max_frames, sample_mode, scene_threshold, scene_probe)
+        _c('INFO', f'抽帧方式：自动（≤{max_frames} 帧且不密于 {interval:g}s{_min_hint}）')
+    frames = extract_frames(video_path, max(0.5, interval), max_frames, sample_mode, scene_threshold, scene_probe, min_frames)
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
         return
