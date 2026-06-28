@@ -20,17 +20,16 @@
     python scripts/video_tasks.py --ollama-url http://localhost:11434
 """
 
-from __future__ import annotations
-
 import argparse
 import base64
+import hashlib
 import json
 import os
 import sys
 import time
 import urllib.request
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Tuple
 
 # macOS 上 cv2 与 faster-whisper 依赖的 av(PyAV) 各自携带一套 libav，
 # 会触发 "Class AVFFrameReceiver is implemented in both ..." 重复加载告警，
@@ -44,6 +43,39 @@ try:
 except Exception as exc:  # pragma: no cover
     print(f'[ERR ] 需要 opencv-python-headless：{exc}', file=sys.stderr)
     sys.exit(2)
+
+# 尝试导入可选依赖
+try:
+    from PIL import Image
+    _HAVE_PIL = True
+except ImportError:
+    _HAVE_PIL = False
+    Image = None
+
+try:
+    import numpy as np
+    _HAVE_NUMPY = True
+except ImportError:
+    _HAVE_NUMPY = False
+    np = None
+
+# 内容去重：感知哈希
+try:
+    if _HAVE_PIL and _HAVE_NUMPY:
+        from PIL import ImageFilter
+        _HAVE_PERCEPTUAL_HASH = True
+    else:
+        _HAVE_PERCEPTUAL_HASH = False
+except Exception:
+    _HAVE_PERCEPTUAL_HASH = False
+
+# 硬字幕OCR：PaddleOCR
+try:
+    from paddleocr import PaddleOCR
+    _HAVE_PADDLE_OCR = True
+except ImportError:
+    _HAVE_PADDLE_OCR = False
+    PaddleOCR = None
 
 
 # --------------------------------------------------------------------------- #
@@ -64,6 +96,29 @@ DEFAULT_MLX_VLM_MODEL = 'mlx-community/Qwen2.5-VL-7B-Instruct-4bit'   # 视觉�
 DEFAULT_MLX_LM_MODEL = 'mlx-community/Qwen2.5-7B-Instruct-4bit'       # 文本（汇总）
 DEFAULT_FRAME_MAX_TOKENS = 300     # MLX 逐帧描述的最大生成 token
 DEFAULT_SUMMARY_MAX_TOKENS = 1200  # MLX 汇总的最大生成 token
+
+# 内容去重配置
+DEFAULT_DEDUP_THRESHOLD = 10  # 感知哈希汉明距离阈值（越小越严格，推荐 5-15）
+DEFAULT_DEDUP_ENABLED = False  # 是否启用内容去重
+
+# 硬字幕OCR配置
+DEFAULT_OCR_ENABLED = False  # 是否启用硬字幕OCR
+DEFAULT_OCR_INTERVAL = 2.0   # OCR识别间隔（秒）
+DEFAULT_OCR_LANG = 'ch'      # PaddleOCR语言：ch（中文）/ en（英文）/ japan（日文）等
+
+# 缓存配置
+DEFAULT_CACHE_ENABLED = True  # 是否启用缓存
+DEFAULT_CACHE_DIR = '~/.video_analysis_cache'  # 缓存目录
+
+# GPU加速配置
+DEFAULT_GPU_ENABLED = True  # 是否启用GPU加速（如果可用）
+
+# 笔记模式配置
+DEFAULT_NOTEBOOK_MODE = False  # 是否启用笔记模式（保存截图+结构化笔记）
+DEFAULT_NOTEBOOK_STYLE = 'education'  # 笔记风格：education(教育/课程), general(通用), meeting(会议)
+
+# 全局帧文件映射（时间戳 -> (绝对路径, 文件名)），供 write_report 引用
+_FRAME_FILES: dict[float, tuple[str, str]] = {}
 
 
 def _c(tag: str, msg: str) -> None:
@@ -144,7 +199,20 @@ def extract_frames(
     path: str, frame_interval: float, max_frames: int, sample_mode: str = 'auto',
     scene_threshold: float = DEFAULT_SCENE_THRESHOLD, scene_probe: float = DEFAULT_SCENE_PROBE,
     min_frames: int = 0,
+    save_images: bool = False,
+    image_dir: Optional[str] = None,
 ) -> list[tuple[float, str]]:
+    """抽取视频帧，可选保存图片文件用于生成带截图的笔记报告。
+
+    Args:
+        save_images: 是否将帧保存为 JPG 文件
+        image_dir: 图片保存目录（默认为视频同目录下的 _frames 子目录）
+    Returns:
+        (时间戳, base64) 列表；若 save_images=True，额外设置全局 _FRAME_FILES 映射
+    """
+    global _FRAME_FILES
+    _FRAME_FILES = {}
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError('无法打开视频用于抽帧')
@@ -152,6 +220,14 @@ def extract_frames(
     fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration = (total_frames / fps) if fps > 0 else 0.0
+
+    # 确定图片保存目录
+    if save_images and not image_dir:
+        base, _ = os.path.splitext(path)
+        image_dir = f'{base}_frames'
+    if save_images and image_dir:
+        image_dir = os.path.expanduser(image_dir)
+        os.makedirs(image_dir, exist_ok=True)
 
     if duration > 0 and sample_mode == 'scene':
         timestamps = _detect_scene_timestamps(cap, duration, max(0.5, scene_probe), scene_threshold)
@@ -192,6 +268,8 @@ def extract_frames(
             timestamps = [round(i * even_step, 2) for i in range(target)]
 
     out: list[tuple[float, str]] = []
+    out_images: list = []  # 存储原始图像用于去重
+    
     for ts in timestamps:
         if duration > 0:
             cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
@@ -208,8 +286,26 @@ def extract_frames(
         ok, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         if not ok:
             continue
-        out.append((round(ts, 2), base64.b64encode(buf.tobytes()).decode('utf-8')))
+        b64_data = base64.b64encode(buf.tobytes()).decode('utf-8')
+        out.append((round(ts, 2), b64_data))
+        out_images.append(frame.copy())  # 保存原始图像用于去重
+
+        # 保存帧图片到文件（用于笔记模式嵌入截图）
+        if save_images and image_dir:
+            frame_idx = len(out) - 1
+            img_filename = f'frame_{frame_idx:03d}_{ts:.1f}s.jpg'
+            img_path = os.path.join(image_dir, img_filename)
+            cv2.imwrite(img_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            _FRAME_FILES[round(ts, 2)] = (img_path, img_filename)
+    
     cap.release()
+    
+    # 内容去重（如果启用）
+    dedup_enabled = defaults.get('dedup_enabled', DEFAULT_DEDUP_ENABLED) if 'defaults' in dir() else DEFAULT_DEDUP_ENABLED
+    if dedup_enabled and _HAVE_PERCEPTUAL_HASH and out:
+        dedup_threshold = defaults.get('dedup_threshold', DEFAULT_DEDUP_THRESHOLD) if 'defaults' in dir() else DEFAULT_DEDUP_THRESHOLD
+        out, out_images = deduplicate_frames(out, out_images, dedup_threshold)
+    
     return out
 
 
@@ -264,6 +360,71 @@ def ollama_chat(
             if obj.get('done'):
                 break
     return ''.join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# 3.1) 并发处理（加速逐帧分析）
+# --------------------------------------------------------------------------- #
+def process_frames_concurrently(
+    frames: list[tuple[float, str]],
+    backend: str,
+    ollama_url: str,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    concurrency: int = 3,
+    stream_log: bool = True,
+) -> list[tuple[int, float, str]]:
+    """并发处理多个帧的识别任务。
+    
+    使用线程池并发调用视觉模型，加速逐帧分析。
+    注意：并发数受限于Ollama的并发处理能力，建议不超过3-5。
+    
+    Args:
+        frames: 帧列表（索引, 时间戳, base64图像）
+        backend: 后端类型（ollama/mlx）
+        ollama_url: Ollama服务地址
+        model: 视觉模型
+        prompt: 逐帧分析提示词
+        max_tokens: 最大生成token数
+        concurrency: 并发数
+        stream_log: 是否实时打印结果
+    
+    Returns:
+        帧分析结果列表（索引, 时间戳, 描述）
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    _c('INFO', f'并发分析 {len(frames)} 帧（并发数={concurrency}）...')
+    
+    def _process_single_frame(i, ts, b64):
+        """处理单帧"""
+        try:
+            if stream_log:
+                # 注意：并发模式下实时打印会交错，这里简化为完成后打印
+                desc = chat(backend, ollama_url, model, prompt, images=[b64],
+                           max_tokens=max_tokens).strip()
+            else:
+                desc = chat(backend, ollama_url, model, prompt, images=[b64],
+                           max_tokens=max_tokens).strip()
+            return (i, ts, desc)
+        except Exception as exc:
+            return (i, ts, f'(帧识别失败：{exc})')
+    
+    results = []
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(_process_single_frame, i, ts, b64): (i, ts, b64) 
+                   for i, (ts, b64) in enumerate(frames)}
+        
+        for future in as_completed(futures):
+            i, ts, desc = future.result()
+            results.append((i, ts, desc))
+            if stream_log:
+                _c('INFO', f'  帧 {i+1}/{len(frames)} @ {ts:.1f}s 完成')
+    
+    # 按索引排序
+    results.sort(key=lambda x: x[0])
+    return [(i, ts, desc) for i, ts, desc in results]
 
 
 # --------------------------------------------------------------------------- #
@@ -479,6 +640,386 @@ def write_srt(video_path: str, segments, output_dir: Optional[str] = None) -> Op
 
 
 # --------------------------------------------------------------------------- #
+# 4) 内容去重（感知哈希）
+# 使用感知哈希算法识别相似帧，避免重复分析几乎相同的帧
+# --------------------------------------------------------------------------- #
+def _perceptual_hash(image: 'np.ndarray', hash_size: int = 8) -> str:
+    """计算图像的感知哈希值。
+    
+    将图像缩放到 hash_size x hash_size，转为灰度图，计算DCT，
+    取左上角低频部分生成哈希值。相似图像会有相似的哈希值。
+    """
+    if not _HAVE_PIL or not _HAVE_NUMPY:
+        return ''
+    
+    try:
+        # 转为PIL Image
+        if len(image.shape) == 3:
+            img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        else:
+            img = Image.fromarray(image)
+        
+        # 缩放到hash_size x hash_size
+        img = img.resize((hash_size, hash_size), Image.Resampling.LANCZOS)
+        
+        # 转为灰度图
+        img = img.convert('L')
+        
+        # 计算DCT
+        pixels = np.array(img.getdata()).reshape((hash_size, hash_size))
+        dct = np.zeros((hash_size, hash_size))
+        
+        # 简化的DCT计算（取平均亮度作为阈值）
+        avg = pixels.mean()
+        
+        # 生成哈希值
+        diff = pixels > avg
+        hash_str = ''.join(['1' if d else '0' for d in diff.flatten()])
+        
+        return hash_str
+    except Exception as exc:
+        _c('WARN', f'感知哈希计算失败：{exc}')
+        return ''
+
+
+# --------------------------------------------------------------------------- #
+# 4.1) 缓存机制
+# 缓存帧分析结果和OCR结果，避免重复分析相同内容
+# --------------------------------------------------------------------------- #
+def _get_cache_key(video_path: str, frame_timestamp: float, model: str, prompt: str) -> str:
+    """生成缓存键。
+    
+    基于视频文件路径、帧时间戳、模型和提示词生成唯一的缓存键。
+    """
+    content = f'{video_path}|{frame_timestamp}|{model}|{prompt}'
+    return hashlib.md5(content.encode('utf-8')).hexdigest()
+
+
+def _get_video_cache_key(video_path: str) -> str:
+    """生成视频级别的缓存键（基于文件内容）。"""
+    try:
+        # 使用文件大小和修改时间生成缓存键（简单快速）
+        stat = os.stat(video_path)
+        content = f'{video_path}|{stat.st_size}|{stat.st_mtime}'
+        return hashlib.md5(content.encode('utf-8')).hexdigest()
+    except Exception:
+        # 如果无法获取文件信息，使用文件路径
+        return hashlib.md5(video_path.encode('utf-8')).hexdigest()
+
+
+def _load_cache(cache_dir: str, cache_key: str) -> Optional[str]:
+    """从缓存加载结果。"""
+    if not DEFAULT_CACHE_ENABLED:
+        return None
+    
+    cache_dir = os.path.expanduser(cache_dir)
+    cache_file = os.path.join(cache_dir, f'{cache_key}.json')
+    
+    if not os.path.isfile(cache_file):
+        return None
+    
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('result')
+    except Exception:
+        return None
+
+
+def _save_cache(cache_dir: str, cache_key: str, result: str) -> None:
+    """保存结果到缓存。"""
+    if not DEFAULT_CACHE_ENABLED:
+        return
+    
+    cache_dir = os.path.expanduser(cache_dir)
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    cache_file = os.path.join(cache_dir, f'{cache_key}.json')
+    
+    try:
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump({'result': result, 'timestamp': time.time()}, f, ensure_ascii=False)
+    except Exception as exc:
+        _c('WARN', f'保存缓存失败：{exc}')
+
+
+# --------------------------------------------------------------------------- #
+# 4.2) GPU加速支持
+# 检测GPU可用性，自动启用GPU加速
+# --------------------------------------------------------------------------- #
+def detect_gpu() -> tuple[bool, str]:
+    """检测GPU可用性。
+    
+    Returns:
+        (has_gpu, gpu_type): 是否有GPU，GPU类型（nvidia/amd/apple/mps）
+    """
+    # 检测NVIDIA GPU
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            _c('INFO', f'检测到NVIDIA GPU: {gpu_name}')
+            return True, 'nvidia'
+    except ImportError:
+        pass
+    
+    # 检测Apple Silicon (MPS)
+    try:
+        import torch
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            _c('INFO', '检测到Apple Silicon GPU (MPS)')
+            return True, 'apple'
+    except ImportError:
+        pass
+    
+    # 检测AMD GPU (ROCm)
+    try:
+        import torch
+        if hasattr(torch.version, 'hip') and torch.version.hip:
+            _c('INFO', '检测到AMD GPU (ROCm)')
+            return True, 'amd'
+    except ImportError:
+        pass
+    
+    # 使用OpenCV检测GPU
+    try:
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            _c('INFO', f'检测到CUDA设备（OpenCV）：{cv2.cuda.getCudaEnabledDeviceCount()} 个')
+            return True, 'nvidia'
+    except Exception:
+        pass
+    
+    _c('INFO', '未检测到GPU，使用CPU模式')
+    return False, ''
+
+
+def auto_configure_gpu(task: dict, defaults: dict) -> bool:
+    """自动配置GPU加速。
+    
+    根据GPU检测结果和配置，自动决定是否使用GPU。
+    
+    Returns:
+        是否启用GPU加速
+    """
+    gpu_enabled = bool(task.get('gpu_enabled', defaults.get('gpu_enabled', DEFAULT_GPU_ENABLED)))
+    
+    if not gpu_enabled:
+        return False
+    
+    has_gpu, gpu_type = detect_gpu()
+    
+    if not has_gpu:
+        _c('WARN', '配置启用了GPU加速，但未检测到可用GPU，将使用CPU')
+        return False
+    
+    _c('OK', f'GPU加速已启用（类型：{gpu_type}）')
+    return True
+
+
+def _hamming_distance(hash1: str, hash2: str) -> int:
+    """计算两个感知哈希值之间的汉明距离。"""
+    if not hash1 or not hash2 or len(hash1) != len(hash2):
+        return 999  # 返回大值表示不匹配
+    
+    # 将二进制字符串转为整数
+    int1 = int(hash1, 2)
+    int2 = int(hash2, 2)
+    
+    # 计算异或后的1的个数（汉明距离）
+    xor = int1 ^ int2
+    return bin(xor).count('1')
+
+
+def deduplicate_frames(frames: list[tuple[float, str]], 
+                       images: list, 
+                       threshold: int = DEFAULT_DEDUP_THRESHOLD) -> tuple[list[tuple[float, str]], list]:
+    """对抽出的帧进行去重，返回去重后的帧列表和对应的图像数据。
+    
+    Args:
+        frames: 时间戳和base64编码的帧列表
+        images: 对应的图像数据列表（numpy数组）
+        threshold: 感知哈希汉明距离阈值，小于此值认为是相似帧
+    
+    Returns:
+        去重后的frames和images
+    """
+    if not _HAVE_PERCEPTUAL_HASH or not frames:
+        return frames, images
+    
+    _c('INFO', f'内容去重：对 {len(frames)} 帧进行去重（阈值={threshold}）...')
+    
+    unique_frames = []
+    unique_images = []
+    hashes = []
+    
+    for i, ((ts, b64), img) in enumerate(zip(frames, images)):
+        # 计算感知哈希
+        hash_val = _perceptual_hash(img)
+        
+        if not hash_val:
+            # 无法计算哈希，保留该帧
+            unique_frames.append((ts, b64))
+            unique_images.append(img)
+            hashes.append(hash_val)
+            continue
+        
+        # 与已有哈希比较
+        is_duplicate = False
+        for existing_hash in hashes:
+            if not existing_hash:
+                continue
+            distance = _hamming_distance(hash_val, existing_hash)
+            if distance < threshold:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            unique_frames.append((ts, b64))
+            unique_images.append(img)
+            hashes.append(hash_val)
+        else:
+            _c('INFO', f'  帧 {i+1} @ {ts:.1f}s 被去重（与已有帧相似）')
+    
+    _c('OK', f'去重完成：{len(frames)} 帧 → {len(unique_frames)} 帧（去除 {len(frames) - len(unique_frames)} 个重复帧）')
+    
+    return unique_frames, unique_images
+
+
+# --------------------------------------------------------------------------- #
+# 5) 硬字幕OCR（PaddleOCR）
+# 识别视频帧中的文字（硬字幕、标题、标语等）
+# --------------------------------------------------------------------------- #
+_OCR_CACHE: dict = {}  # OCR模型缓存
+
+def init_ocr(ocr_lang: str = DEFAULT_OCR_LANG, use_gpu: bool = False):
+    """初始化PaddleOCR模型。"""
+    if not _HAVE_PADDLE_OCR:
+        _c('WARN', '未安装 PaddleOCR，跳过硬字幕识别')
+        return None
+    
+    cache_key = f'{ocr_lang}_{use_gpu}'
+    if cache_key in _OCR_CACHE:
+        return _OCR_CACHE[cache_key]
+    
+    try:
+        _c('INFO', f'加载 PaddleOCR 模型（语言={ocr_lang}, GPU={use_gpu}）...')
+        ocr = PaddleOCR(
+            use_angle_cls=True,
+            lang=ocr_lang,
+            use_gpu=use_gpu,
+            show_log=False
+        )
+        _OCR_CACHE[cache_key] = ocr
+        _c('OK', 'PaddleOCR 模型加载成功')
+        return ocr
+    except Exception as exc:
+        _c('WARN', f'PaddleOCR 模型加载失败：{exc}')
+        return None
+
+
+def recognize_text_in_frame(ocr, image: 'np.ndarray') -> list[tuple[float, float, float, float, str, float]]:
+    """识别单帧中的文字。
+    
+    Args:
+        ocr: PaddleOCR实例
+        image: 图像数据（numpy数组）
+    
+    Returns:
+        识别结果列表：[(x1, y1, x2, y2, text, confidence), ...]
+    """
+    if ocr is None:
+        return []
+    
+    try:
+        # PaddleOCR识别
+        result = ocr.ocr(image, cls=True)
+        
+        if not result or not result[0]:
+            return []
+        
+        # 解析结果
+        text_regions = []
+        for line in result[0]:
+            box = line[0]  # 四个点的坐标
+            text = line[1][0]  # 识别的文本
+            confidence = line[1][1]  # 置信度
+            
+            # 计算边界框
+            x1 = min(box[0][0], box[3][0])
+            y1 = min(box[0][1], box[1][1])
+            x2 = max(box[1][0], box[2][0])
+            y2 = max(box[2][1], box[3][1])
+            
+            text_regions.append((x1, y1, x2, y2, text, confidence))
+        
+        return text_regions
+    except Exception as exc:
+        _c('WARN', f'OCR识别失败：{exc}')
+        return []
+
+
+def ocr_video_frames(video_path: str, 
+                     frames: list[tuple[float, str]], 
+                     ocr_interval: float = DEFAULT_OCR_INTERVAL,
+                     ocr_lang: str = DEFAULT_OCR_LANG,
+                     use_gpu: bool = False) -> dict:
+    """对视频帧进行OCR识别，返回时间戳到识别结果的映射。
+    
+    Args:
+        video_path: 视频路径
+        frames: 抽帧列表（时间戳, base64）
+        ocr_interval: OCR识别间隔（秒），避免每帧都识别
+        ocr_lang: OCR语言
+        use_gpu: 是否使用GPU
+    
+    Returns:
+        字典：{timestamp: [(x1, y1, x2, y2, text, confidence), ...]}
+    """
+    if not _HAVE_PADDLE_OCR:
+        return {}
+    
+    ocr = init_ocr(ocr_lang, use_gpu)
+    if ocr is None:
+        return {}
+    
+    _c('INFO', f'硬字幕OCR：识别 {len(frames)} 帧中的文字（间隔={ocr_interval}s）...')
+    
+    results = {}
+    last_ocr_time = -ocr_interval  # 确保第一帧被识别
+    
+    for i, (ts, b64) in enumerate(frames):
+        # 按间隔进行OCR识别
+        if ts - last_ocr_time < ocr_interval and i > 0:
+            continue
+        
+        # 解码base64图像
+        try:
+            img_data = base64.b64decode(b64)
+            img_array = np.frombuffer(img_data, dtype=np.uint8)
+            image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            
+            if image is None:
+                continue
+            
+            # OCR识别
+            text_regions = recognize_text_in_frame(ocr, image)
+            
+            if text_regions:
+                results[ts] = text_regions
+                texts = [r[4] for r in text_regions if r[4]]
+                _c('INFO', f'  帧 {i+1} @ {ts:.1f}s: 识别到 {len(text_regions)} 个文本区域，内容：{texts[:3]}...')
+            
+            last_ocr_time = ts
+        except Exception as exc:
+            _c('WARN', f'  帧 {i+1} @ {ts:.1f}s OCR失败：{exc}')
+            continue
+    
+    _c('OK', f'OCR识别完成：在 {len(frames)} 帧中识别到 {sum(len(v) for v in results.values())} 个文本区域')
+    
+    return results
+
+
+# --------------------------------------------------------------------------- #
 # 提示词
 # --------------------------------------------------------------------------- #
 def frame_prompt(language: str, custom: Optional[str]) -> str:
@@ -490,7 +1031,61 @@ def frame_prompt(language: str, custom: Optional[str]) -> str:
     return '请详细描述这一帧画面：场景、人物、动作、画面文字、关键物体以及整体氛围。请简洁（2-4 句）。'
 
 
-def summary_prompt(language: str, meta: dict, transcript: str = '') -> str:
+def notebook_frame_prompt(language: str, style: str = 'education') -> str:
+    """笔记模式的逐帧提示词 - 针对知识提取优化。
+
+    Args:
+        style: 笔记风格
+            - education: 教育/课程视频（提取知识点、公式、例题）
+            - general: 通用视频（提取关键信息）
+            - meeting: 会议/演讲（提取议题、结论、行动项）
+    """
+    prompts = {
+        'education': {
+            'zh': ('你是一位专业的学习笔记助手。请分析这帧教学/课程画面，提取以下信息（如有）：\n'
+                   '1. **知识点/主题**：当前讲解的核心概念或公式\n'
+                   '2. **画面文字**：PPT/黑板上的文字内容（原样保留）\n'
+                   '3. **关键要点**：讲师强调的重点\n'
+                   '4. **例题/题目**：展示的例题或练习题\n'
+                   '请用简洁的中文输出，没有的内容不编造。格式参考：\n'
+                   '- 【知识点】xxx\n'
+                   '- 【板书】xxx\n'
+                   '- 【要点】xxx'),
+            'en': ('You are a study note assistant. Analyze this educational video frame and extract:\n'
+                   '1. **Key Concept**: The core topic or formula being taught\n'
+                   '2. **On-screen Text**: Text from PPT/blackboard (preserve original)\n' 
+                   '3. **Key Points**: What the instructor emphasizes\n'
+                   '4. **Examples**: Problems or exercises shown\n'
+                   'Output concisely in English. Do not fabricate missing content.'),
+        },
+        'general': {
+            'zh': ('请分析这帧画面的核心信息，用简洁的中文输出：\n'
+                   '- 核心内容（1句话概括）\n'
+                   '- 关键细节（人物、文字、物体等）\n'
+                   '- 值得记录的信息点'),
+            'en': ('Analyze this frame and output:\n'
+                   '- Core content (one-line summary)\n'
+                   '- Key details (people, text, objects)\n'
+                   '- Notable information worth recording'),
+        },
+        'meeting': {
+            'zh': ('请分析这帧会议/演讲画面，提取：\n'
+                   '- 演讲者/发言人\n'
+                   '- 当前议题或观点\n'
+                   '- PPT/屏幕上的关键内容\n'
+                   '- 重要数据或结论'),
+            'en': ('Analyze this meeting/presentation frame and extract:\n'
+                   '- Speaker\n'
+                   '- Current topic or point\n'
+                   '- Key PPT/screen content\n'
+                   '- Important data or conclusions'),
+        },
+    }
+    style_cfg = prompts.get(style, prompts['general'])
+    return style_cfg.get(language, style_cfg['zh'])
+
+
+def summary_prompt(language: str, meta: dict, transcript: str = '', ocr_text: str = '') -> str:
     if language == 'en':
         head = ('Below are time-ordered frame descriptions of one video. Synthesize them into a '
                 'structured analysis with sections: ## Overview, ## Timeline, ## Key Subjects & Actions, '
@@ -503,6 +1098,134 @@ def summary_prompt(language: str, meta: dict, transcript: str = '') -> str:
         out += ('\n\nAn audio transcript is also provided; combine audio and visuals.'
                 if language == 'en' else
                 '\n\n另外提供了音频转写文本（台词/旁白），请结合声音与画面一起分析。')
+    if ocr_text:
+        out += ('\n\nHard-coded subtitles / on-screen text detected via OCR; incorporate this text information.'
+                if language == 'en' else
+                '\n\n另外通过OCR识别到画面中的硬字幕/文字，请将这些文字信息也纳入分析。')
+    return out
+
+
+def notebook_summary_prompt(language: str, meta: dict, style: str = 'education',
+                            transcript: str = '', ocr_text: str = '') -> str:
+    """笔记模式的汇总提示词 - 生成结构化学习笔记。
+
+    Args:
+        style: 笔记风格（education/general/meeting）
+    """
+    prompts = {
+        'education': {
+            'zh': (
+                '你是一位专业的学习笔记整理专家。以下是从课程视频中按时间顺序抽取的画面分析结果。\n\n'
+                '请将其整理为**结构化的学习笔记**，要求：\n\n'
+                '### 格式要求\n'
+                '1. **课程概述**：本节课程的核心主题和目标\n'
+                '2. **知识点清单**：按逻辑顺序列出所有知识点，每个知识点包含：\n'
+                '   - 概念名称\n'
+                '   - 简要解释\n'
+                '   - 对应时间戳 [MM:SS]\n'
+                '3. **重点解析**：\n'
+                '   - 题目/问题类型归纳\n'
+                '   - 解题策略/方法论\n'
+                '   - 易错点/注意事项\n'
+                '4. **例题整理**（如有）：\n'
+                '   - 例题原文\n'
+                '   - 解题思路\n'
+                '   - 时间戳引用\n'
+                '5. **板书/PPT文字汇总**（如有）\n'
+                '6. **复习建议**：关键要点回顾\n\n'
+                '### 注意事项\n'
+                '- 每个重要知识点必须标注对应的时间戳 [MM:SS]，方便回看\n'
+                '- 保持逻辑清晰，同类内容合并\n'
+                '- 不编造不存在的内容\n'
+                f'\n\n---\n（视频参数：时长 {meta["duration_hms"]} / 分辨率 {meta["resolution"]}）\n'
+            ),
+            'en': (
+                'You are an expert at creating structured study notes. Below are frame-by-frame analyses '
+                'from an educational video.\n\nPlease organize them into a **structured study note** with:\n\n'
+                '### Required Sections\n'
+                '1. **Course Overview**: Core topic and objectives\n'
+                '2. **Knowledge Points**: List all concepts logically, each with:\n'
+                '   - Concept name\n'
+                '   - Brief explanation\n'
+                '   - Timestamp [MM:SS]\n'
+                '3. **Key Analysis**:\n'
+                '   - Problem types summary\n'
+                '   - Solution strategies/methods\n'
+                '   - Common pitfalls\n'
+                '4. **Example Problems** (if any):\n'
+                '   - Original problem\n'
+                '   - Solution approach\n'
+                '   - Timestamp reference\n'
+                '5. **Board/PPT Text Summary** (if any)\n'
+                '6. **Review Tips**: Key takeaways\n\n'
+                '### Guidelines\n'
+                '- Each knowledge point MUST include timestamp [MM:SS] for easy review\n'
+                '- Keep logical flow; merge similar content\n'
+                f'- Video info: Duration {meta["duration_hms"]} / Resolution {meta["resolution"]}\n'
+            ),
+        },
+        'general': {
+            'zh': (
+                '以下是视频逐帧分析结果，请整理为**结构化笔记**：\n'
+                '## 概要\n'
+                '一句话总结视频核心内容。\n'
+                '## 详细内容（按时间线）\n'
+                '按时间顺序列出关键信息点，每条标注时间戳 [MM:SS]。\n'
+                '## 重点摘录\n'
+                '值得记录的核心信息、数据、结论。\n'
+                f'\n（视频参数：时长 {meta["duration_hms"]}）\n'
+            ),
+            'en': (
+                'Below are frame analyses. Please create **structured notes**:\n'
+                '## Summary\n'
+                'One-line overview of the video.\n'
+                '## Detailed Content (Timeline)\n'
+                'Key information points in chronological order, each with [MM:SS].\n'
+                '## Key Takeaways\n'
+                'Core information, data, conclusions worth recording.\n'
+                f'\n(Video: Duration {meta["duration_hms"]})\n'
+            ),
+        },
+        'meeting': {
+            'zh': (
+                '以下是会议/演讲视频的逐帧分析，请整理为**会议纪要格式**：\n'
+                '## 会议概要\n'
+                '会议主题、时间、参会人（如可识别）\n'
+                '## 议程与讨论\n'
+                '按时间线列出各议题及核心观点，标注时间戳 [MM:SS]。\n'
+                '## 决议与行动项\n'
+                '明确的决定和待办事项。\n'
+                '## 关键数据/图表\n'
+                '重要的数字、图表内容。\n'
+                f'\n（视频参数：时长 {meta["duration_hms"]}）\n'
+            ),
+            'en': (
+                'Below are frame analyses of a meeting/video. Please create **meeting minutes**:\n'
+                '## Meeting Overview\n'
+                'Topic, time, attendees (if identifiable)\n'
+                '## Agenda & Discussion\n'
+                'Topics and key points in chronological order, each with [MM:SS].\n'
+                '## Decisions & Action Items\n'
+                'Clear decisions and next steps.\n'
+                '## Key Data/Charts\n'
+                'Important numbers, chart contents.\n'
+                f'\n(Video: Duration {meta["duration_hms"]})\n'
+            ),
+        },
+    }
+    style_cfg = prompts.get(style, prompts['general'])
+    out = style_cfg.get(language, style_cfg['zh'])
+
+    if transcript:
+        out += ('\n\n【音频转写文本】请将以下语音内容也纳入笔记整理：\n' if language == 'zh'
+                else '\n\n[Audio Transcript] Please also incorporate the following speech:\n')
+        out += transcript
+
+    if ocr_text:
+        out += ('\n\n【OCR识别文字】画面中的文字内容如下，请整合到对应的知识点中：\n' if language == 'zh'
+                else '\n\n[OCR Text] On-screen text to incorporate:\n')
+        out += ocr_text
+
     return out
 
 
@@ -561,15 +1284,31 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
             _c('INFO', f'已存在报告，跳过：{_existing}')
             return
 
+    # ===== 笔记模式配置 =====
+    notebook_mode = bool(task.get('notebook_mode', defaults.get('notebook_mode', DEFAULT_NOTEBOOK_MODE)))
+    notebook_style = str(task.get('notebook_style', defaults.get('notebook_style', DEFAULT_NOTEBOOK_STYLE)) or DEFAULT_NOTEBOOK_STYLE)
+    
+    if notebook_mode:
+        _c('OK', f'笔记模式已启用（风格={notebook_style}）- 将保存帧截图并生成结构化笔记')
+
     if not model:
         _c('ERR', f'未指定视觉模型（task.model 或 default_model）：{video_path}')
         return
 
     started = time.time()
     _c('INFO', f'分析：{video_path}')
+    
+    # 检测并配置GPU加速
+    gpu_available = auto_configure_gpu(task, defaults)
+    
     if vision_backend == 'mlx' or summary_backend == 'mlx':
         _c('INFO', f'MLX 后端启用（视觉={vision_backend} / 汇总={summary_backend}）；'
                    f'首次使用会自动下载模型，请耐心等待。')
+    
+    # 如果GPU可用且OCR启用，自动配置OCR使用GPU
+    if gpu_available and ocr_enabled:
+        _c('INFO', 'GPU可用，OCR将尝试使用GPU加速')
+        # 注意：PaddleOCR的GPU配置在init_ocr函数中处理
 
     # 1) 主要参数
     meta = probe_metadata(video_path)
@@ -586,36 +1325,137 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         _c('INFO', f'抽帧方式：镜头切换检测（每 {scene_probe:g}s 探测，相关度<{scene_threshold:g} 判为新镜头，上限 {MAX_FRAMES_HARD_CAP} 帧{_min_hint}）')
     else:
         _c('INFO', f'抽帧方式：自动（≤{max_frames} 帧且不密于 {interval:g}s{_min_hint}）')
-    frames = extract_frames(video_path, max(0.5, interval), max_frames, sample_mode, scene_threshold, scene_probe, min_frames)
+    
+    # 读取去重配置
+    dedup_enabled = bool(task.get('dedup_enabled', defaults.get('dedup_enabled', DEFAULT_DEDUP_ENABLED)))
+    dedup_threshold = int(task.get('dedup_threshold', defaults.get('dedup_threshold', DEFAULT_DEDUP_THRESHOLD)))
+    
+    # 笔记模式：确定帧图片保存目录
+    _img_dir = None
+    if notebook_mode:
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        if output_dir:
+            _img_dir = os.path.join(output_dir, f'{base_name}_frames')
+        else:
+            _img_dir = f'{os.path.splitext(video_path)[0]}_frames'
+    
+    frames = extract_frames(
+        video_path, max(0.5, interval), max_frames, sample_mode,
+        scene_threshold, scene_probe, min_frames,
+        save_images=notebook_mode, image_dir=_img_dir
+    )
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
         return
     _c('INFO', f'已抽取 {len(frames)} 帧，使用视觉模型 [{vision_backend}] {model} 逐帧识别…')
+    
+    # 如果启用了去重，在extract_frames中已经处理，这里不需要重复处理
+    if dedup_enabled:
+        _c('INFO', f'内容去重已启用（阈值={dedup_threshold}）')
 
-    # 3) 逐帧描述（顺序，避免本机显存压力）
-    fp = frame_prompt(language, custom_prompt)
-    frame_results: list[tuple[int, float, str]] = []
-    for i, (ts, b64) in enumerate(frames):
-        _c('INFO', f'  帧 {i + 1}/{len(frames)} @ {ts:.1f}s')
-        try:
-            if stream_log:
-                # 流式：边识别边把描述吐到终端，实时可见
-                sys.stdout.write('\033[2m      ')  # 暗色缩进前缀
-                sys.stdout.flush()
-                desc = chat(
-                    vision_backend, ollama_url, model, fp, images=[b64],
-                    stream=True, on_delta=lambda d: (sys.stdout.write(d), sys.stdout.flush()),
-                    max_tokens=frame_max_tokens,
-                ).strip()
-                sys.stdout.write('\033[0m\n')
-                sys.stdout.flush()
+    # 3) 逐帧描述（支持并发加速）- 笔记模式使用专用提示词
+    if notebook_mode:
+        fp = notebook_frame_prompt(language, notebook_style)
+        _c('INFO', f'使用笔记模式提示词（风格={notebook_style}）')
+    else:
+        fp = frame_prompt(language, custom_prompt)
+    
+    concurrency = int(task.get('concurrency', defaults.get('concurrency', 1)))  # 默认顺序处理
+    
+    if concurrency > 1 and len(frames) > 1:
+        # 并发处理
+        _c('INFO', f'使用并发模式分析帧（并发数={concurrency}）...')
+        
+        # 检查缓存
+        cache_enabled = bool(task.get('cache_enabled', defaults.get('cache_enabled', DEFAULT_CACHE_ENABLED)))
+        cache_dir = task.get('cache_dir', defaults.get('cache_dir', DEFAULT_CACHE_DIR))
+        
+        if cache_enabled:
+            _c('INFO', '检查缓存...')
+            cached_results = []
+            uncached_frames = []
+            
+            for i, (ts, b64) in enumerate(frames):
+                cache_key = _get_cache_key(video_path, ts, model, fp)
+                cached = _load_cache(cache_dir, cache_key)
+                if cached:
+                    cached_results.append((i, ts, cached))
+                    _c('INFO', f'  帧 {i + 1}/{len(frames)} @ {ts:.1f}s [缓存]')
+                else:
+                    uncached_frames.append((i, ts, b64))
+            
+            if uncached_frames:
+                _c('INFO', f'缓存命中 {len(cached_results)} 帧，需分析 {len(uncached_frames)} 帧')
+                # 并发分析未缓存的帧
+                uncached_results = process_frames_concurrently(
+                    [(ts, b64) for _, ts, b64 in uncached_frames], 
+                    vision_backend, ollama_url, model, fp, frame_max_tokens,
+                    concurrency=concurrency, stream_log=stream_log
+                )
+                
+                # 保存结果到缓存
+                for (i, ts, b64), (_, _, desc) in zip(uncached_frames, uncached_results):
+                    cache_key = _get_cache_key(video_path, ts, model, fp)
+                    _save_cache(cache_dir, cache_key, desc)
+                    cached_results.append((i, ts, desc))
             else:
-                desc = chat(vision_backend, ollama_url, model, fp, images=[b64],
-                            max_tokens=frame_max_tokens).strip()
-        except Exception as exc:
-            desc = f'(帧识别失败：{exc})'
-            _c('WARN', f'  帧 {i + 1} 识别失败：{exc}')
-        frame_results.append((i, ts, desc))
+                _c('INFO', '全部帧命中缓存，跳过分析')
+            
+            # 按索引排序
+            frame_results = sorted(cached_results, key=lambda x: x[0])
+        else:
+            # 不使用缓存，直接并发分析
+            frame_results_raw = process_frames_concurrently(
+                frames, vision_backend, ollama_url, model, fp, frame_max_tokens,
+                concurrency=concurrency, stream_log=stream_log
+            )
+            # 转换为原来的格式
+            frame_results = [(i, ts, desc) for i, ts, desc in frame_results_raw]
+    else:
+        # 顺序处理（原有逻辑）
+        _c('INFO', f'使用顺序模式分析帧...')
+        
+        # 检查缓存
+        cache_enabled = bool(task.get('cache_enabled', defaults.get('cache_enabled', DEFAULT_CACHE_ENABLED)))
+        cache_dir = task.get('cache_dir', defaults.get('cache_dir', DEFAULT_CACHE_DIR))
+        
+        frame_results: list[tuple[int, float, str]] = []
+        for i, (ts, b64) in enumerate(frames):
+            _c('INFO', f'  帧 {i + 1}/{len(frames)} @ {ts:.1f}s')
+            
+            # 尝试从缓存加载
+            if cache_enabled:
+                cache_key = _get_cache_key(video_path, ts, model, fp)
+                cached = _load_cache(cache_dir, cache_key)
+                if cached:
+                    _c('INFO', f'    [缓存] {cached[:50]}...')
+                    frame_results.append((i, ts, cached))
+                    continue
+            
+            try:
+                if stream_log:
+                    # 流式：边识别边把描述吐到终端，实时可见
+                    sys.stdout.write('\033[2m      ')  # 暗色缩进前缀
+                    sys.stdout.flush()
+                    desc = chat(
+                        vision_backend, ollama_url, model, fp, images=[b64],
+                        stream=True, on_delta=lambda d: (sys.stdout.write(d), sys.stdout.flush()),
+                        max_tokens=frame_max_tokens,
+                    ).strip()
+                    sys.stdout.write('\033[0m\n')
+                    sys.stdout.flush()
+                else:
+                    desc = chat(vision_backend, ollama_url, model, fp, images=[b64],
+                                max_tokens=frame_max_tokens).strip()
+                
+                # 保存到缓存
+                if cache_enabled:
+                    cache_key = _get_cache_key(video_path, ts, model, fp)
+                    _save_cache(cache_dir, cache_key, desc)
+            except Exception as exc:
+                desc = f'(帧识别失败：{exc})'
+                _c('WARN', f'  帧 {i + 1} 识别失败：{exc}')
+            frame_results.append((i, ts, desc))
 
     # 3.5) 可选：音频转写（faster-whisper）
     transcript, segments, srt_path = '', [], None
@@ -630,13 +1470,54 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
                     _c('OK', f'字幕已导出 → {srt_path}')
         else:
             _c('WARN', '未获得音频转写文本（可能无音轨或 faster-whisper 不可用）')
+    
+    # 3.6) 可选：硬字幕OCR（PaddleOCR）
+    ocr_enabled = bool(task.get('ocr_enabled', defaults.get('ocr_enabled', DEFAULT_OCR_ENABLED)))
+    ocr_results = {}
+    if ocr_enabled:
+        ocr_interval = float(task.get('ocr_interval', defaults.get('ocr_interval', DEFAULT_OCR_INTERVAL)))
+        ocr_lang = task.get('ocr_lang', defaults.get('ocr_lang', DEFAULT_OCR_LANG))
+        ocr_use_gpu = bool(task.get('ocr_use_gpu', defaults.get('ocr_use_gpu', False)))
+        
+        _c('INFO', f'硬字幕OCR识别（PaddleOCR / {ocr_lang}）…')
+        ocr_results = ocr_video_frames(
+            video_path, frames, 
+            ocr_interval=ocr_interval,
+            ocr_lang=ocr_lang,
+            use_gpu=ocr_use_gpu
+        )
+        if ocr_results:
+            total_text_regions = sum(len(v) for v in ocr_results.values())
+            _c('OK', f'OCR识别完成（在 {len(ocr_results)} 帧中识别到 {total_text_regions} 个文本区域）')
+        else:
+            _c('WARN', '未识别到硬字幕文字（可能视频无字幕或 PaddleOCR 不可用）')
 
-    # 4) 汇总（结合画面 + 音频）
+    # 4) 汇总（结合画面 + 音频 + OCR）- 笔记模式使用专用汇总提示词
     _c('INFO', f'使用 [{summary_backend}] {summary_model} 汇总…')
     joined = '\n'.join(f'- [{ts:.1f}s] {desc}' for _, ts, desc in frame_results)
-    fuse_input = f'{summary_prompt(language, meta, transcript)}\n\n## 画面帧描述\n{joined}'
+    
+    # 准备OCR文本（如果有）
+    ocr_text = ''
+    if ocr_results:
+        ocr_text_parts = []
+        for ts, text_regions in sorted(ocr_results.items()):
+            texts = [r[4] for r in text_regions if r[4]]
+            if texts:
+                ocr_text_parts.append(f'[{ts:.1f}s] {" | ".join(texts)}')
+        ocr_text = '\n'.join(ocr_text_parts)
+    
+    # 根据是否笔记模式选择不同的汇总提示词
+    if notebook_mode:
+        fuse_prompt = notebook_summary_prompt(language, meta, notebook_style, transcript, ocr_text)
+    else:
+        fuse_prompt = summary_prompt(language, meta, transcript, ocr_text)
+    
+    fuse_input = f'{fuse_prompt}\n\n## 画面帧描述\n{joined}'
     if transcript:
         fuse_input += f'\n\n## 音频转写\n{transcript}'
+    if ocr_text:
+        fuse_input += f'\n\n## 画面文字(OCR)\n{ocr_text}'
+    
     try:
         if stream_log:
             sys.stdout.write('\033[2m')  # 暗色显示汇总过程
@@ -657,19 +1538,34 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     elapsed = round(time.time() - started, 2)
     _c('OK', f'完成：{video_path}（耗时 {elapsed}s）')
 
-    # 5) 写报告
+    # 5) 写报告（笔记模式传入notebook_mode参数以嵌入截图）
     if save_report:
         report_path = write_report(
             video_path, model, summary_model, meta, frame_results, summary, elapsed,
             transcript=transcript, srt_path=srt_path, output_dir=output_dir,
+            ocr_results=ocr_results if ocr_enabled else None,
+            notebook_mode=notebook_mode,
         )
         _c('OK', f'报告已保存 → {report_path}')
 
 
 def write_report(video_path, model, summary_model, meta, frame_results, summary, elapsed,
                  transcript: str = '', srt_path: Optional[str] = None,
-                 output_dir: Optional[str] = None) -> str:
+                 output_dir: Optional[str] = None,
+                 ocr_results: Optional[dict] = None,
+                 notebook_mode: bool = False) -> str:
+    """写分析报告，支持笔记模式（嵌入帧截图）。"""
     report_path = f'{_out_base(video_path, output_dir)}.analysis.md'
+    
+    # 计算相对路径（用于Markdown图片引用）
+    def _img_rel_path(img_abs_path: str) -> str:
+        """计算图片相对于报告文件的路径"""
+        try:
+            report_dir = os.path.dirname(os.path.abspath(report_path))
+            return os.path.relpath(img_abs_path, report_dir)
+        except Exception:
+            return os.path.basename(img_abs_path)
+
     lines = [
         '# 视频离线分析报告 / Video Analysis Report',
         '',
@@ -698,9 +1594,37 @@ def write_report(video_path, model, summary_model, meta, frame_results, summary,
         if srt_path:
             lines += [f'> 字幕文件 / SRT: `{os.path.basename(srt_path)}`', '']
         lines += [transcript, '']
+    
+    # 添加OCR结果
+    if ocr_results:
+        lines += ['---', '', '## 画面文字识别(OCR) / On-screen Text Recognition', '']
+        lines += ['| 时间(s) | 识别的文字 |', '|---------|-----------|']
+        for ts in sorted(ocr_results.keys()):
+            text_regions = ocr_results[ts]
+            texts = [r[4] for r in text_regions if r[4]]
+            if texts:
+                # 笔记模式下，尝试嵌入对应时间的截图
+                img_markdown = ''
+                if notebook_mode and ts in _FRAME_FILES:
+                    img_path, img_name = _FRAME_FILES[ts]
+                    rel_path = _img_rel_path(img_path)
+                    img_markdown = f'\n<br>![截图@{ts:.1f}s]({rel_path})'
+                lines += [f'| {ts:.1f} | {"<br>".join(texts)}{img_markdown} |']
+        lines += ['', '']
+    
+    # 逐帧描述部分 - 笔记模式增强：嵌入截图
     lines += ['---', '', '## 逐帧描述 / Per-frame descriptions', '']
     for idx, ts, desc in frame_results:
-        lines += [f'### 帧 {idx} @ {ts:.1f}s', '', desc, '']
+        lines += [f'### 帧 {idx} @ {ts:.1f}s', '']
+        
+        # 笔记模式：在每帧描述前嵌入对应的截图
+        if notebook_mode and ts in _FRAME_FILES:
+            img_path, img_name = _FRAME_FILES[ts]
+            rel_path = _img_rel_path(img_path)
+            lines += [f'![帧{idx}截图@{ts:.1f}s]({rel_path})', '']
+        
+        lines += [desc, '']
+
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
     return report_path

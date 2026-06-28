@@ -226,3 +226,44 @@ export const listVideoBatches = async (token: string) => _get(token, '/batch');
 /** Request cancellation of a running batch job. */
 export const cancelVideoBatch = async (token: string, jobId: string) =>
 	_post(token, `/batch/${jobId}/cancel`, {});
+
+/** Pause a running batch job. */
+export const pauseVideoBatch = async (token: string, jobId: string) =>
+	_post(token, `/batch/${jobId}/pause`, {});
+
+/** Resume a paused batch job. */
+export const resumeVideoBatch = async (token: string, jobId: string) =>
+	_post(token, `/batch/${jobId}/resume`, {});
+
+/** Retry failed items in a batch job. */
+export const retryVideoBatch = async (token: string, jobId: string, videoPath?: string) =>
+	_post(token, `/batch/${jobId}/retry`, videoPath ? { video_path: videoPath } : {});
+
+// --------------------------------------------------------------------------- //
+// History
+// --------------------------------------------------------------------------- //
+export type VideoHistoryItem = {
+	video_path: string;
+	video_name: string;
+	model?: string;
+	summary_model?: string;
+	duration?: number;
+	sampled_frames?: number;
+	has_audio: boolean;
+	language: string;
+	analyzed_at: string;
+	summary?: string;
+	transcript?: string;
+	frames: any[];
+	report_path?: string;
+	elapsed?: number;
+	file_size?: number;
+};
+
+/** Get video analysis history (newest first). */
+export const getVideoHistory = async (token: string): Promise<VideoHistoryItem[]> =>
+	_get(token, '/history');
+
+/** Delete history records for a video. */
+export const deleteVideoHistory = async (token: string, videoPath: string) =>
+	_post(token, '/history', { video_path: videoPath });

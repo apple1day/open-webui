@@ -218,3 +218,7 @@ RUN_VIDEO_TASKS=1 USE_MYSQL=0 ./start-video-analysis.sh
 > - 每开新终端先执行 〇 节的 `export PATH=...`，否则 `npm`/`ffmpeg` 找不到。
 > - 后端若报 `chromadb requires sqlite3 >= 3.35.0`，见 `setup-linux.md` 第 4 节（pysqlite3 修复）。
 > - 本环境用 SQLite，所有启动命令都带 `USE_MYSQL=0`。
+
+
+
+./venv/bin/python scripts/video_tasks.py --config docs/json/yun-1.json --ollama-url http://localhost:11434

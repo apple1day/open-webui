@@ -1,0 +1,78 @@
+{
+  "ollama_url": "http://localhost:11434",
+  "default_model": "minicpm-v:latest",
+  "default_summary_model": "qwen2.5:14b",
+  "language": "zh",
+  "include_audio": false,
+  "whisper_model": "base",
+  "whisper_language": null,
+  "sample_mode": "auto",
+  "min_frames": 20,
+  "tasks": [
+    {
+      "video_path": "/data/workspace/data/1.mp4",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "sample_mode": "auto",
+      "max_frames": 20,
+      "min_frames": 20,
+      "include_audio": true,
+      "whisper_model": "small",
+      "prompt": null,
+      "save_report": true
+    },
+    {
+      "video_path": "/data/workspace/data/测试hdr.mov",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "sample_mode": "auto",
+      "max_frames": 20,
+      "min_frames": 20,
+      "include_audio": true,
+      "whisper_model": "small",
+      "prompt": null,
+      "save_report": true
+    },
+    {
+      "video_path": "/data/workspace/data/qiji臻彩效果.mov",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "sample_mode": "auto",
+      "max_frames": 20,
+      "min_frames": 20,
+      "include_audio": true,
+      "whisper_model": "small",
+      "prompt": null,
+      "save_report": true
+    },
+    {
+      "video_path": "/data/workspace/data/test_01.mp4",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "sample_mode": "auto",
+      "max_frames": 20,
+      "min_frames": 20,
+      "include_audio": true,
+      "whisper_model": "small",
+      "prompt": null,
+      "save_report": true
+    },
+    {
+      "video_path": "/data/workspace/data/请_01.mp4",
+      "model": "minicpm-v:latest",
+      "summary_model": "qwen2.5:14b",
+      "language": "zh",
+      "sample_mode": "auto",
+      "max_frames": 20,
+      "min_frames": 20,
+      "include_audio": true,
+      "whisper_model": "small",
+      "prompt": null,
+      "save_report": true
+    }
+  ]
+}

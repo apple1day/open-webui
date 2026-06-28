@@ -17,8 +17,6 @@ Endpoints (mounted at ``/api/v1/video``):
     POST /analyze/stream  - same, but stream progress events over SSE
 """
 
-from __future__ import annotations
-
 import asyncio
 import base64
 import json
@@ -521,7 +519,11 @@ async def analyze_video(
     user=Depends(get_verified_user),
 ) -> VideoAnalyzeResponse:
     """Read a local video and produce an offline LLM analysis report."""
-    return await _run_analysis(request, form_data)
+    result = await _run_analysis(request, form_data)
+    # Save to history if analysis completed successfully
+    if result.status == 'done':
+        _append_history_record(form_data, result)
+    return result
 
 
 @router.post('/analyze/stream')
@@ -540,6 +542,9 @@ async def analyze_video_stream(
     async def runner() -> None:
         try:
             result = await _run_analysis(request, form_data, on_progress=on_progress)
+            # Save to history if analysis completed successfully
+            if result.status == 'done':
+                _append_history_record(form_data, result)
             await queue.put({'stage': 'result', 'result': result.model_dump()})
         except HTTPException as exc:
             await queue.put({'stage': 'error', 'detail': exc.detail, 'status': exc.status_code})
@@ -701,8 +706,14 @@ async def _run_batch(request: Request, job_id: str) -> None:
         return
 
     for item in job['items']:
+        # Check for cancel
         if job.get('cancel'):
             break
+        
+        # Check for pause
+        while job.get('paused') and not job.get('cancel'):
+            await asyncio.sleep(1)
+        
         if item['status'] != 'pending':
             continue
 
@@ -743,6 +754,9 @@ async def _run_batch(request: Request, job_id: str) -> None:
             item['summary'] = result.summary
             item['elapsed'] = result.elapsed
             item['sampled_frames'] = result.sampled_frames
+            # Save to history if analysis completed successfully
+            if result.status == 'done':
+                _append_history_record(form, result)
         except HTTPException as exc:
             item['status'] = 'error'
             item['error'] = str(exc.detail)
@@ -832,6 +846,7 @@ async def start_batch(
         'created': time.time(),
         'finished': None,
         'cancel': False,
+        'paused': False,
         'total': len(items),
         'completed': sum(1 for it in items if it['status'] == 'skipped'),
         'current': None,
@@ -903,6 +918,69 @@ async def cancel_batch(job_id: str, user=Depends(get_verified_user)) -> dict:
     if job['status'] == 'running':
         job['cancel'] = True
     return {'id': job_id, 'status': job['status'], 'cancel': job['cancel']}
+
+
+@router.post('/batch/{job_id}/pause')
+async def pause_batch(job_id: str, user=Depends(get_verified_user)) -> dict:
+    """Pause a running batch job."""
+    job = _BATCH_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail='Batch job not found')
+    if job['status'] == 'running':
+        job['paused'] = True
+        job['status'] = 'paused'
+    return {'id': job_id, 'status': job['status'], 'paused': job['paused']}
+
+
+@router.post('/batch/{job_id}/resume')
+async def resume_batch(job_id: str, user=Depends(get_verified_user)) -> dict:
+    """Resume a paused batch job."""
+    job = _BATCH_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail='Batch job not found')
+    if job['status'] == 'paused':
+        job['paused'] = False
+        job['status'] = 'running'
+    return {'id': job_id, 'status': job['status'], 'paused': job['paused']}
+
+
+@router.post('/batch/{job_id}/retry')
+async def retry_batch(job_id: str, request: Request, user=Depends(get_verified_user)) -> dict:
+    """Retry failed items in a batch job."""
+    job = _BATCH_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail='Batch job not found')
+    
+    # Get optional video path from request body
+    try:
+        body = await request.json()
+        video_path = body.get('video_path')
+    except Exception:
+        video_path = None
+    
+    retried = 0
+    for item in job['items']:
+        if video_path:
+            # Retry specific video
+            if item['path'] == video_path and item['status'] == 'error':
+                item['status'] = 'pending'
+                item['error'] = None
+                retried += 1
+        else:
+            # Retry all failed videos
+            if item['status'] == 'error':
+                item['status'] = 'pending'
+                item['error'] = None
+                retried += 1
+    
+    if retried > 0 and job['status'] in ('done', 'error', 'cancelled'):
+        # Restart the job if it was finished
+        job['status'] = 'running'
+        job['cancel'] = False
+        job['finished'] = None
+        asyncio.create_task(_run_batch(request, job_id))
+    
+    return {'id': job_id, 'status': job['status'], 'retried': retried}
 
 
 # --------------------------------------------------------------------------- #
@@ -1027,3 +1105,138 @@ async def analyze_uploaded_video(
             except OSError:
                 pass
     return result
+
+
+# --------------------------------------------------------------------------- #
+# History: persistent, cross-session record of finished analyses.
+# --------------------------------------------------------------------------- #
+# Analyses that finish with status=="done" are appended to a per-install
+# JSONL file (`video_analysis_history.jsonl` next to `open_webui.db`).
+# The file is append-only; each line is a complete JSON object so the file
+# can be tailed / rotated without parsing the whole thing.
+# --------------------------------------------------------------------------- #
+_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'video_analysis_history.jsonl')
+
+
+def _append_history(record: dict) -> None:
+    """Append one analysis record to the history file (JSONL)."""
+    try:
+        os.makedirs(os.path.dirname(_HISTORY_PATH), exist_ok=True)
+        with open(_HISTORY_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+    except Exception:
+        log.warning('Failed to append video analysis history', exc_info=True)
+
+
+def _append_history_record(form_data: VideoAnalyzeForm, result: VideoAnalyzeResponse) -> None:
+    """Build and append a history record from form data and analysis result."""
+    try:
+        record = {
+            'video_path': form_data.video_path,
+            'video_name': os.path.basename(form_data.video_path),
+            'model': result.model,
+            'summary_model': result.summary_model,
+            'duration': result.duration,
+            'sampled_frames': result.sampled_frames,
+            'has_audio': bool(result.transcript),
+            'language': form_data.language,
+            'analyzed_at': datetime.utcnow().isoformat(),
+            'summary': result.summary,
+            'transcript': result.transcript,
+            'frames': [fr.model_dump() for fr in result.frames] if result.frames else [],
+            'report_path': result.report_path,
+            'elapsed': result.elapsed,
+            'file_size': os.path.getsize(form_data.video_path) if os.path.exists(form_data.video_path) else None,
+        }
+        _append_history(record)
+    except Exception:
+        log.warning('Failed to build history record', exc_info=True)
+
+
+def _load_history() -> list[dict]:
+    """Load all history records (newest first)."""
+    records = []
+    if not os.path.exists(_HISTORY_PATH):
+        return records
+    try:
+        with open(_HISTORY_PATH, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        log.warning('Failed to load video analysis history', exc_info=True)
+    # Newest first
+    records.reverse()
+    return records
+
+
+def _delete_history(video_path: str) -> bool:
+    """Delete all history records for *video_path* (path is the unique key)."""
+    if not os.path.exists(_HISTORY_PATH):
+        return False
+    try:
+        with open(_HISTORY_PATH, 'r', encoding='utf-8') as f:
+            lines = [l.strip() for l in f if l.strip()]
+        kept = []
+        deleted = False
+        for line in lines:
+            try:
+                rec = json.loads(line)
+                if rec.get('video_path') != video_path:
+                    kept.append(line)
+                else:
+                    deleted = True
+            except json.JSONDecodeError:
+                kept.append(line)
+        if deleted:
+            with open(_HISTORY_PATH, 'w', encoding='utf-8') as f:
+                for line in kept:
+                    f.write(line + '\n')
+        return deleted
+    except Exception:
+        log.warning('Failed to delete video analysis history', exc_info=True)
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# History API endpoints
+# --------------------------------------------------------------------------- #
+class VideoHistoryItem(BaseModel):
+    video_path: str
+    video_name: str
+    model: Optional[str] = None
+    summary_model: Optional[str] = None
+    duration: Optional[float] = None
+    sampled_frames: Optional[int] = None
+    has_audio: bool = False
+    language: str = 'zh'
+    analyzed_at: str
+    summary: Optional[str] = None
+    transcript: Optional[str] = None
+    frames: list = []
+    report_path: Optional[str] = None
+    elapsed: Optional[float] = None
+    file_size: Optional[int] = None
+
+
+@router.get('/history', response_model=list[VideoHistoryItem])
+async def get_video_history(user=Depends(get_verified_user)) -> list[dict]:
+    """Return persisted video analysis history (newest first)."""
+    return _load_history()
+
+
+@router.delete('/history')
+async def delete_video_history(request: Request, user=Depends(get_verified_user)) -> dict:
+    """Delete history records for the given video path."""
+    body = await request.json()
+    video_path = body.get('video_path')
+    if not video_path:
+        raise HTTPException(status_code=400, detail='video_path is required')
+    deleted = _delete_history(video_path)
+    return {'deleted': deleted}
+
