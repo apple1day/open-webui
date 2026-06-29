@@ -290,7 +290,7 @@ def extract_frames_from_segment(path: str, start_time: float, end_time: float,
     return out
 
 # 全局帧文件映射（时间戳 -> (绝对路径, 文件名)），供 write_report 引用
-_FRAME_FILES: dict[float, tuple[str, str]] = {}
+_FRAME_FILES = {}  # type: dict[float, tuple[str, str]]
 
 
 def _c(tag: str, msg: str) -> None:
@@ -1722,7 +1722,41 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
 
     started = time.time()
     _c('INFO', f'分析：{video_path}')
-    
+
+    # ===== 抽帧相关配置（必须在抽帧前完成定义，避免「先用后定义」崩溃）=====
+    # 硬字幕 OCR 开关
+    ocr_enabled = bool(task.get('ocr_enabled', defaults.get('ocr_enabled', DEFAULT_OCR_ENABLED)))
+    # 内容去重
+    dedup_enabled = bool(task.get('dedup_enabled', defaults.get('dedup_enabled', DEFAULT_DEDUP_ENABLED)))
+    dedup_threshold = int(task.get('dedup_threshold', defaults.get('dedup_threshold', DEFAULT_DEDUP_THRESHOLD)))
+    dedup_config = {'enabled': True, 'threshold': dedup_threshold} if dedup_enabled else None
+    if dedup_enabled:
+        _c('INFO', f'内容去重已启用（阈值={dedup_threshold}）')
+    # 增强版镜头检测
+    scene_enhanced = bool(task.get('scene_enhanced', defaults.get('scene_enhanced', False)))
+    if scene_enhanced and sample_mode == 'scene':
+        _c('INFO', '增强版镜头检测已启用（综合多维度）')
+    # 帧质量过滤
+    quality_filter_enabled = bool(task.get('quality_filter_enabled', defaults.get('quality_filter_enabled', DEFAULT_QUALITY_FILTER_ENABLED)))
+    quality_config = None
+    if quality_filter_enabled:
+        quality_config = {
+            'enabled': True,
+            'blur_threshold': float(task.get('quality_blur_threshold', defaults.get('quality_blur_threshold', DEFAULT_QUALITY_BLUR_THRESHOLD))),
+            'dark_threshold': float(task.get('quality_dark_threshold', defaults.get('quality_dark_threshold', DEFAULT_QUALITY_DARK_THRESHOLD))),
+            'bright_threshold': float(task.get('quality_bright_threshold', defaults.get('quality_bright_threshold', DEFAULT_QUALITY_BRIGHT_THRESHOLD))),
+            'static_threshold': float(task.get('quality_static_threshold', defaults.get('quality_static_threshold', DEFAULT_QUALITY_STATIC_THRESHOLD))),
+        }
+        _c('INFO', f'帧质量过滤已启用（模糊阈值={quality_config["blur_threshold"]}，亮度范围={quality_config["dark_threshold"]}-{quality_config["bright_threshold"]}）')
+    # 笔记模式：帧截图保存目录
+    _img_dir = None
+    if notebook_mode:
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        if output_dir:
+            _img_dir = os.path.join(output_dir, f'{base_name}_frames')
+        else:
+            _img_dir = f'{os.path.splitext(video_path)[0]}_frames'
+
     # 检测并配置GPU加速
     gpu_available = auto_configure_gpu(task, defaults)
     
@@ -1814,7 +1848,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
             _c('INFO', f'抽帧方式：镜头切换检测（每 {scene_probe:g}s 探测，相关度<{scene_threshold:g} 判为新镜头，上限 {MAX_FRAMES_HARD_CAP} 帧{_min_hint}）')
         else:
             _c('INFO', f'抽帧方式：自动（≤{max_frames} 帧且不密于 {interval:g}s{_min_hint}）')
-        
+
         frames = extract_frames(
             video_path, max(0.5, interval), max_frames, sample_mode,
             scene_threshold, scene_probe, min_frames,
@@ -1823,55 +1857,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
             dedup_config=dedup_config,
             scene_enhanced=scene_enhanced
         )
-    
-    # 读取去重配置（用于日志显示）
-    dedup_enabled = bool(task.get('dedup_enabled', defaults.get('dedup_enabled', DEFAULT_DEDUP_ENABLED)))
-    dedup_threshold = int(task.get('dedup_threshold', defaults.get('dedup_threshold', DEFAULT_DEDUP_THRESHOLD)))
-    
-    # 读取增强scene检测配置
-    scene_enhanced = bool(task.get('scene_enhanced', defaults.get('scene_enhanced', False)))
-    if scene_enhanced and sample_mode == 'scene':
-        _c('INFO', '增强版镜头检测已启用（综合多维度）')
-    
-    # 读取帧质量过滤配置
-    quality_filter_enabled = bool(task.get('quality_filter_enabled', defaults.get('quality_filter_enabled', DEFAULT_QUALITY_FILTER_ENABLED)))
-    quality_config = None
-    if quality_filter_enabled:
-        quality_config = {
-            'enabled': True,
-            'blur_threshold': float(task.get('quality_blur_threshold', defaults.get('quality_blur_threshold', DEFAULT_QUALITY_BLUR_THRESHOLD))),
-            'dark_threshold': float(task.get('quality_dark_threshold', defaults.get('quality_dark_threshold', DEFAULT_QUALITY_DARK_THRESHOLD))),
-            'bright_threshold': float(task.get('quality_bright_threshold', defaults.get('quality_bright_threshold', DEFAULT_QUALITY_BRIGHT_THRESHOLD))),
-            'static_threshold': float(task.get('quality_static_threshold', defaults.get('quality_static_threshold', DEFAULT_QUALITY_STATIC_THRESHOLD))),
-        }
-        _c('INFO', f'帧质量过滤已启用（模糊阈值={quality_config["blur_threshold"]}，亮度范围={quality_config["dark_threshold"]}-{quality_config["bright_threshold"]}）')
-    
-    # 读取去重配置
-    dedup_config = None
-    if dedup_enabled:
-        dedup_config = {
-            'enabled': True,
-            'threshold': dedup_threshold,
-        }
-        _c('INFO', f'内容去重已启用（阈值={dedup_threshold}）')
-    
-    # 笔记模式：确定帧图片保存目录
-    _img_dir = None
-    if notebook_mode:
-        base_name = os.path.splitext(os.path.basename(video_path))[0]
-        if output_dir:
-            _img_dir = os.path.join(output_dir, f'{base_name}_frames')
-        else:
-            _img_dir = f'{os.path.splitext(video_path)[0]}_frames'
-    
-    frames = extract_frames(
-        video_path, max(0.5, interval), max_frames, sample_mode,
-        scene_threshold, scene_probe, min_frames,
-        save_images=notebook_mode, image_dir=_img_dir,
-        quality_config=quality_config,
-        dedup_config=dedup_config,
-        scene_enhanced=scene_enhanced
-    )
+
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
         return
@@ -1999,8 +1985,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         else:
             _c('WARN', '未获得音频转写文本（可能无音轨或 faster-whisper 不可用）')
     
-    # 3.6) 可选：硬字幕OCR（PaddleOCR）
-    ocr_enabled = bool(task.get('ocr_enabled', defaults.get('ocr_enabled', DEFAULT_OCR_ENABLED)))
+    # 3.6) 可选：硬字幕OCR（PaddleOCR）—— ocr_enabled 已在抽帧前统一定义
     ocr_results = {}
     if ocr_enabled:
         ocr_interval = float(task.get('ocr_interval', defaults.get('ocr_interval', DEFAULT_OCR_INTERVAL)))

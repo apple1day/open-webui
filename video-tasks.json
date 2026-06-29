@@ -1,1 +1,57 @@
-{"ollama_url": "http://localhost:11434", "default_model": "minicpm-v:latest", "default_summary_model": "qwen2.5:14b", "language": "zh", "include_audio": false, "whisper_model": "base", "whisper_language": null, "sample_mode": "auto", "min_frames": 20, "concurrency": 3, "cache_enabled": true, "cache_dir": "~/.video_analysis_cache", "gpu_enabled": true, "skip_existing": true, "tasks": [{"video_dir": "/data/workspace/data", "recursive": false, "model": "minicpm-v:latest", "summary_model": "qwen2.5:14b", "language": "zh", "sample_mode": "scene", "scene_enhanced": true, "max_frames": 30, "min_frames": 20, "include_audio": true, "whisper_model": "small", "save_report": true, "concurrency": 3, "cache_enabled": true, "dedup_enabled": true, "dedup_threshold": 10, "quality_filter_enabled": true, "quality_blur_threshold": 100.0, "quality_dark_threshold": 30.0, "quality_bright_threshold": 225.0}, {"video_path": "/data/workspace/data/1.mp4", "model": "minicpm-v:latest", "summary_model": "qwen2.5:14b", "language": "zh", "notebook_mode": true, "notebook_style": "education", "sample_mode": "scene", "scene_enhanced": true, "max_frames": 20, "min_frames": 15, "save_report": true, "concurrency": 3, "cache_enabled": true, "ocr_enabled": false, "quality_filter_enabled": true}]}
+{
+    "ollama_url": "http://localhost:11434",
+    "default_model": "minicpm-v:latest",
+    "default_summary_model": "qwen2.5:14b",
+    "language": "zh",
+    "include_audio": false,
+    "whisper_model": "base",
+    "whisper_language": null,
+    "sample_mode": "auto",
+    "min_frames": 20,
+    "concurrency": 3,
+    "cache_enabled": true,
+    "cache_dir": "~/.video_analysis_cache",
+    "gpu_enabled": true,
+    "skip_existing": true,
+    "tasks": [
+        {
+            "video_dir": "/data/workspace/data",
+            "recursive": false,
+            "model": "minicpm-v:latest",
+            "summary_model": "qwen2.5:14b",
+            "language": "zh",
+            "sample_mode": "scene",
+            "scene_enhanced": true,
+            "max_frames": 30,
+            "min_frames": 20,
+            "include_audio": true,
+            "whisper_model": "small",
+            "save_report": true,
+            "concurrency": 3,
+            "cache_enabled": true,
+            "dedup_enabled": true,
+            "dedup_threshold": 10,
+            "quality_filter_enabled": true,
+            "quality_blur_threshold": 100.0,
+            "quality_dark_threshold": 30.0,
+            "quality_bright_threshold": 225.0
+        },
+        {
+            "video_path": "/data/workspace/data/1.mp4",
+            "model": "minicpm-v:latest",
+            "summary_model": "qwen2.5:14b",
+            "language": "zh",
+            "notebook_mode": true,
+            "notebook_style": "education",
+            "sample_mode": "scene",
+            "scene_enhanced": true,
+            "max_frames": 20,
+            "min_frames": 15,
+            "save_report": true,
+            "concurrency": 3,
+            "cache_enabled": true,
+            "ocr_enabled": false,
+            "quality_filter_enabled": true
+        }
+    ]
+}

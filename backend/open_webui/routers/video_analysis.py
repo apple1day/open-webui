@@ -111,6 +111,7 @@ class VideoAnalyzeResponse(BaseModel):
     summary: str
     report_path: Optional[str] = None
     elapsed: float
+    status: str = 'done'
 
 
 # --------------------------------------------------------------------------- #
@@ -488,6 +489,176 @@ async def health(user=Depends(get_verified_user)) -> dict:
             'concurrency': DEFAULT_CONCURRENCY,
         },
     }
+
+
+@router.post('/upload-and-analyze')
+async def upload_and_analyze(
+    request: Request,
+    file: UploadFile = File(...),
+    model: str = Form(...),
+    summary_model: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+    frame_interval: float = Form(DEFAULT_FRAME_INTERVAL),
+    max_frames: int = Form(DEFAULT_MAX_FRAMES),
+    min_frames: int = Form(DEFAULT_MIN_FRAMES),
+    concurrency: int = Form(DEFAULT_CONCURRENCY),
+    language: str = Form('zh'),
+    include_audio: bool = Form(False),
+    whisper_model: Optional[str] = Form(None),
+    save_report: bool = Form(True),
+    ollama_url: Optional[str] = Form(None),
+    user=Depends(get_verified_user),
+) -> VideoAnalyzeResponse:
+    """Upload a video file and analyze it.
+    
+    This endpoint accepts a video file upload, saves it to UPLOAD_DIR,
+    and then analyzes it using the video analysis pipeline.
+    
+    Returns the same response as /analyze.
+    """
+    # Validate file extension
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in SUPPORTED_VIDEO_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Unsupported video type "{ext}". Supported: {sorted(SUPPORTED_VIDEO_EXTS)}'
+        )
+    
+    # Save uploaded file
+    upload_dir = UPLOAD_DIR
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    # Generate unique filename to avoid collisions
+    file_id = str(uuid.uuid4())
+    safe_filename = f'{file_id}{ext}'
+    file_path = os.path.join(upload_dir, safe_filename)
+    
+    try:
+        with open(file_path, 'wb') as f:
+            content = await file.read()
+            f.write(content)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Failed to save uploaded file: {exc}')
+    
+    # Create form data for analysis
+    form_data = VideoAnalyzeForm(
+        video_path=file_path,
+        model=model,
+        summary_model=summary_model,
+        prompt=prompt,
+        frame_interval=frame_interval,
+        max_frames=max_frames,
+        min_frames=min_frames,
+        concurrency=concurrency,
+        language=language,
+        include_audio=include_audio,
+        whisper_model=whisper_model,
+        save_report=save_report,
+        ollama_url=ollama_url,
+    )
+    
+    # Run analysis
+    try:
+        result = await _run_analysis(request, form_data)
+        return result
+    except Exception as exc:
+        # Clean up uploaded file on error
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+        raise
+
+
+@router.post('/upload-and-analyze/stream')
+async def upload_and_analyze_stream(
+    request: Request,
+    file: UploadFile = File(...),
+    model: str = Form(...),
+    summary_model: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+    frame_interval: float = Form(DEFAULT_FRAME_INTERVAL),
+    max_frames: int = Form(DEFAULT_MAX_FRAMES),
+    min_frames: int = Form(DEFAULT_MIN_FRAMES),
+    concurrency: int = Form(DEFAULT_CONCURRENCY),
+    language: str = Form('zh'),
+    include_audio: bool = Form(False),
+    whisper_model: Optional[str] = Form(None),
+    save_report: bool = Form(True),
+    ollama_url: Optional[str] = Form(None),
+    user=Depends(get_verified_user),
+):
+    """Upload a video file and analyze it with streaming progress updates (SSE)."""
+    # Validate file extension
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in SUPPORTED_VIDEO_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Unsupported video type "{ext}". Supported: {sorted(SUPPORTED_VIDEO_EXTS)}'
+        )
+    
+    # Save uploaded file
+    upload_dir = UPLOAD_DIR
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    file_id = str(uuid.uuid4())
+    safe_filename = f'{file_id}{ext}'
+    file_path = os.path.join(upload_dir, safe_filename)
+    
+    try:
+        with open(file_path, 'wb') as f:
+            content = await file.read()
+            f.write(content)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Failed to save uploaded file: {exc}')
+    
+    # Create form data for analysis
+    form_data = VideoAnalyzeForm(
+        video_path=file_path,
+        model=model,
+        summary_model=summary_model,
+        prompt=prompt,
+        frame_interval=frame_interval,
+        max_frames=max_frames,
+        min_frames=min_frames,
+        concurrency=concurrency,
+        language=language,
+        include_audio=include_audio,
+        whisper_model=whisper_model,
+        save_report=save_report,
+        ollama_url=ollama_url,
+    )
+    
+    # Stream progress events
+    async def progress_generator():
+        queue = asyncio.Queue()
+        
+        async def on_progress(event: dict):
+            await queue.put(event)
+        
+        # Run analysis in background
+        async def run_analysis():
+            try:
+                result = await _run_analysis(request, form_data, on_progress=on_progress)
+                await queue.put({'stage': 'done', 'result': result.model_dump()})
+            except Exception as exc:
+                await queue.put({'stage': 'error', 'detail': str(exc)})
+            finally:
+                await queue.put(None)  # Signal end
+        
+        task = asyncio.create_task(run_analysis())
+        
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            yield f'data: {json.dumps(event, ensure_ascii=False)}\n\n'
+        
+        await task
+    
+    return StreamingResponse(
+        progress_generator(),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
 
 
 @router.get('/models')
