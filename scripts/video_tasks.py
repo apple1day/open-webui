@@ -117,6 +117,178 @@ DEFAULT_GPU_ENABLED = True  # 是否启用GPU加速（如果可用）
 DEFAULT_NOTEBOOK_MODE = False  # 是否启用笔记模式（保存截图+结构化笔记）
 DEFAULT_NOTEBOOK_STYLE = 'education'  # 笔记风格：education(教育/课程), general(通用), meeting(会议)
 
+# 帧质量过滤配置
+DEFAULT_QUALITY_FILTER_ENABLED = False  # 是否启用帧质量过滤（过滤模糊、过暗、静态帧）
+DEFAULT_QUALITY_BLUR_THRESHOLD = 100.0  # 拉普拉斯方差阈值（小于此值认为是模糊帧）
+DEFAULT_QUALITY_DARK_THRESHOLD = 30.0   # 平均亮度下限（小于此值认为是过暗帧）
+DEFAULT_QUALITY_BRIGHT_THRESHOLD = 225.0  # 平均亮度上限（大于此值认为是过曝帧）
+DEFAULT_QUALITY_STATIC_THRESHOLD = 0.98  # 帧间相似度阈值（大于此值认为是静态帧，与上一帧几乎相同）
+
+# 长视频分段配置
+DEFAULT_SEGMENT_ENABLED = False   # 是否启用长视频分段处理
+DEFAULT_SEGMENT_DURATION = 600.0  # 每段时长（秒），默认10分钟
+DEFAULT_SEGMENT_OVERLAP = 30.0    # 段间重叠时长（秒），避免切分关键内容
+
+# --------------------------------------------------------------------------- #
+# 2.3) 长视频分段处理
+# 将长视频切分为多个片段分别处理，避免内存溢出和提高处理速度
+# --------------------------------------------------------------------------- #
+def split_video_for_processing(path: str, segment_duration: float = DEFAULT_SEGMENT_DURATION,
+                                segment_overlap: float = DEFAULT_SEGMENT_OVERLAP) -> list[tuple[float, float]]:
+    """将视频分段，返回每段的时间范围列表。
+    
+    Args:
+        path: 视频文件路径
+        segment_duration: 每段时长（秒）
+        segment_overlap: 段间重叠时长（秒）
+    
+    Returns:
+        [(start_time, end_time), ...] 列表
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return [(0.0, 0.0)]
+    
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration = (total_frames / fps) if fps > 0 else 0.0
+    cap.release()
+    
+    if duration <= segment_duration:
+        # 视频时长小于分段时长，无需分段
+        return [(0.0, duration)]
+    
+    segments = []
+    start = 0.0
+    
+    while start < duration:
+        end = min(start + segment_duration, duration)
+        segments.append((start, end))
+        
+        # 下一段的起始位置（考虑重叠）
+        start = end - segment_overlap
+        if start < 0:
+            start = 0
+    
+    _c('INFO', f'长视频分段：{duration:.1f}秒 → {len(segments)}段（每段{segment_duration}秒，重叠{segment_overlap}秒）')
+    return segments
+
+
+def extract_frames_from_segment(path: str, start_time: float, end_time: float,
+                                frame_interval: float, max_frames: int, 
+                                sample_mode: str = 'auto',
+                                scene_threshold: float = DEFAULT_SCENE_THRESHOLD,
+                                scene_probe: float = DEFAULT_SCENE_PROBE,
+                                min_frames: int = 0,
+                                save_images: bool = False,
+                                image_dir: Optional[str] = None,
+                                quality_config: Optional[dict] = None,
+                                dedup_config: Optional[dict] = None,
+                                scene_enhanced: bool = False) -> list[tuple[float, str]]:
+    """从视频的指定时间段抽取帧。
+    
+    与extract_frames类似，但只处理指定时间范围。
+    """
+    global _FRAME_FILES
+    
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError('无法打开视频用于抽帧')
+    
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    duration = end_time - start_time
+    
+    if duration <= 0:
+        cap.release()
+        return []
+    
+    # 确定图片保存目录
+    if save_images and not image_dir:
+        base, _ = os.path.splitext(path)
+        image_dir = f'{base}_frames'
+    if save_images and image_dir:
+        image_dir = os.path.expanduser(image_dir)
+        os.makedirs(image_dir, exist_ok=True)
+    
+    # 根据sample_mode确定该段内的抽帧时间戳
+    timestamps = []
+    
+    if sample_mode == 'scene':
+        # 镜头检测模式：从start_time开始
+        if scene_enhanced:
+            # 注意：这里需要临时设置cap的位置
+            cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000.0)
+            # 为简化，使用基础版镜头检测
+            scene_timestamps = _detect_scene_timestamps(cap, duration, max(0.5, scene_probe), scene_threshold)
+            timestamps = [start_time + ts for ts in scene_timestamps if ts <= duration]
+        else:
+            cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000.0)
+            scene_timestamps = _detect_scene_timestamps(cap, duration, max(0.5, scene_probe), scene_threshold)
+            timestamps = [start_time + ts for ts in scene_timestamps if ts <= duration]
+    elif sample_mode == 'count':
+        # 固定张数模式
+        limit = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
+        step = duration / limit
+        timestamps = [start_time + (i * step) for i in range(limit)]
+    elif sample_mode == 'interval':
+        # 时间间隔模式
+        step = max(0.5, frame_interval)
+        limit = int(duration // step) + 1
+        if limit > MAX_FRAMES_HARD_CAP:
+            limit = MAX_FRAMES_HARD_CAP
+            step = duration / limit
+        timestamps = [start_time + (i * step) for i in range(limit)]
+    else:
+        # auto模式
+        limit = max(1, min(max_frames, MAX_FRAMES_HARD_CAP))
+        step = max(frame_interval, duration / limit)
+        timestamps = [start_time + (i * step) for i in range(limit)]
+    
+    # 最少帧数保底
+    if min_frames and len(timestamps) < min_frames:
+        target = min(int(min_frames), MAX_FRAMES_HARD_CAP)
+        even_step = duration / target
+        timestamps = [start_time + (i * even_step) for i in range(target)]
+    
+    # 抽取帧
+    out = []
+    for ts in timestamps:
+        if ts > end_time:
+            break
+        cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        
+        h, w = frame.shape[:2]
+        long_edge = max(h, w)
+        if long_edge > MAX_FRAME_EDGE:
+            scale = MAX_FRAME_EDGE / long_edge
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        
+        ok, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        if not ok:
+            continue
+        
+        b64_data = base64.b64encode(buf.tobytes()).decode('utf-8')
+        out.append((round(ts, 2), b64_data))
+        
+        # 保存帧图片
+        if save_images and image_dir:
+            frame_idx = len(out) - 1
+            img_filename = f'frame_{frame_idx:03d}_{ts:.1f}s.jpg'
+            img_path = os.path.join(image_dir, img_filename)
+            cv2.imwrite(img_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            _FRAME_FILES[round(ts, 2)] = (img_path, img_filename)
+    
+    cap.release()
+    
+    # 质量过滤
+    if quality_config and quality_config.get('enabled', False):
+        out = filter_frames_by_quality(out, quality_config)
+    
+    return out
+
 # 全局帧文件映射（时间戳 -> (绝对路径, 文件名)），供 write_report 引用
 _FRAME_FILES: dict[float, tuple[str, str]] = {}
 
@@ -156,6 +328,232 @@ def probe_metadata(path: str) -> dict:
         'codec': codec or 'unknown',
         'size_mb': round(size_bytes / 1024 / 1024, 2),
     }
+
+
+# --------------------------------------------------------------------------- #
+# 2.1) 帧质量过滤（P0改进：过滤模糊、过暗、静态帧）
+# --------------------------------------------------------------------------- #
+def _is_blurry(frame: 'np.ndarray', threshold: float = DEFAULT_QUALITY_BLUR_THRESHOLD) -> bool:
+    """判断帧是否模糊（拉普拉斯方差法）。
+    
+    拉普拉斯方差越小，图像越模糊。通常<100认为是模糊的。
+    """
+    if not _HAVE_NUMPY:
+        return False
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        variance = cv2.Laplacian(gray, cv2.CV_64F).var()
+        return variance < threshold
+    except Exception:
+        return False
+
+
+def _is_bad_lighting(frame: 'np.ndarray', 
+                     dark_threshold: float = DEFAULT_QUALITY_DARK_THRESHOLD,
+                     bright_threshold: float = DEFAULT_QUALITY_BRIGHT_THRESHOLD) -> bool:
+    """判断帧是否过暗或过曝。
+    
+    计算平均亮度，超出阈值范围则过滤。
+    """
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        avg_brightness = gray.mean()
+        return avg_brightness < dark_threshold or avg_brightness > bright_threshold
+    except Exception:
+        return False
+
+
+def _is_static_frame(frame: 'np.ndarray', prev_frame: 'np.ndarray', 
+                     threshold: float = DEFAULT_QUALITY_STATIC_THRESHOLD) -> bool:
+    """判断帧是否与上一帧几乎相同（静态帧）。
+    
+    计算两帧的结构相似度（SSIM简化版：用MSE替代），
+    相似度高于阈值则认为是静态帧。
+    """
+    if prev_frame is None:
+        return False
+    try:
+        # 转灰度后计算均方误差（MSE）
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+        
+        # 缩放以提高速度
+        h, w = gray.shape
+        if h > 160 or w > 160:
+            gray_small = cv2.resize(gray, (160, 90), interpolation=cv2.INTER_AREA)
+            prev_small = cv2.resize(prev_gray, (160, 90), interpolation=cv2.INTER_AREA)
+        else:
+            gray_small = gray
+            prev_small = prev_gray
+        
+        # 计算结构相似度（简化版：用相关系数替代SSIM）
+        gray_small = gray_small.astype(np.float32)
+        prev_small = prev_small.astype(np.float32)
+        corr = cv2.matchTemplate(gray_small, prev_small, cv2.TM_CCOEFF_NORMED)[0][0]
+        # TM_CCOEFF_NORMED 返回值在[-1,1]，需要转换
+        # 改用直接计算相似度
+        diff = np.abs(gray_small - prev_small)
+        similarity = 1.0 - (diff.mean() / 255.0)
+        return similarity > threshold
+    except Exception:
+        return False
+
+
+def filter_frames_by_quality(frames: list[tuple[float, str]], 
+                             quality_config: dict) -> list[tuple[float, str]]:
+    """根据质量配置过滤帧。
+    
+    Args:
+        frames: (时间戳, base64) 列表
+        quality_config: 质量过滤配置字典
+            - enabled: 是否启用
+            - blur_threshold: 模糊阈值
+            - dark_threshold: 过暗阈值
+            - bright_threshold: 过曝阈值
+            - static_threshold: 静态帧阈值
+    
+    Returns:
+        过滤后的帧列表
+    """
+    if not quality_config.get('enabled', False) or not frames:
+        return frames
+    
+    _c('INFO', f'帧质量过滤：对 {len(frames)} 帧进行质量检查...')
+    
+    blur_threshold = quality_config.get('blur_threshold', DEFAULT_QUALITY_BLUR_THRESHOLD)
+    dark_threshold = quality_config.get('dark_threshold', DEFAULT_QUALITY_DARK_THRESHOLD)
+    bright_threshold = quality_config.get('bright_threshold', DEFAULT_QUALITY_BRIGHT_THRESHOLD)
+    static_threshold = quality_config.get('static_threshold', DEFAULT_QUALITY_STATIC_THRESHOLD)
+    
+    filtered = []
+    prev_frame = None
+    filtered_count = 0
+    
+    for i, (ts, b64) in enumerate(frames):
+        # 解码base64为numpy数组用于质量检查
+        try:
+            img_data = base64.b64decode(b64)
+            img_array = np.frombuffer(img_data, dtype=np.uint8)
+            frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            
+            if frame is None:
+                filtered.append((ts, b64))
+                continue
+            
+            # 检查模糊
+            if _is_blurry(frame, blur_threshold):
+                _c('INFO', f'  帧 {i+1} @ {ts:.1f}s 被过滤（模糊）')
+                filtered_count += 1
+                prev_frame = frame
+                continue
+            
+            # 检查亮度
+            if _is_bad_lighting(frame, dark_threshold, bright_threshold):
+                _c('INFO', f'  帧 {i+1} @ {ts:.1f}s 被过滤（过暗/过曝）')
+                filtered_count += 1
+                prev_frame = frame
+                continue
+            
+            # 检查静态帧
+            if _is_static_frame(frame, prev_frame, static_threshold):
+                _c('INFO', f'  帧 {i+1} @ {ts:.1f}s 被过滤（静态帧）')
+                filtered_count += 1
+                prev_frame = frame
+                continue
+            
+            # 通过所有检查
+            filtered.append((ts, b64))
+            prev_frame = frame
+        except Exception as exc:
+            _c('WARN', f'  帧 {i+1} @ {ts:.1f}s 质量检查失败：{exc}，保留该帧')
+            filtered.append((ts, b64))
+    
+    _c('OK', f'质量过滤完成：{len(frames)} 帧 → {len(filtered)} 帧（过滤 {filtered_count} 个低质量帧）')
+    return filtered
+
+
+# --------------------------------------------------------------------------- #
+# 2.2) 增强 scene 模式：综合多维度镜头检测
+# --------------------------------------------------------------------------- #
+def _detect_scene_timestamps_enhanced(cap, duration: float, probe: float, 
+                                       threshold: float = DEFAULT_SCENE_THRESHOLD) -> list[float]:
+    """增强版镜头切换检测：综合 HSV 相关度 + 帧间差值 + 边缘变化。
+    
+    相比基础版（只用HSV相关度），增加：
+    1. 帧间绝对差值（突然变化说明镜头切换）
+    2. 边缘密度变化（场景切换通常伴随边缘剧变）
+    
+    Args:
+        cap: OpenCV VideoCapture 对象
+        duration: 视频时长（秒）
+        probe: 探测间隔（秒）
+        threshold: HSV相关度阈值
+    
+    Returns:
+        判定为镜头切换的时间戳列表
+    """
+    stamps: list[float] = []
+    prev_hist = None
+    prev_frame = None
+    prev_edge_density = None
+    t = 0.0
+    
+    while t < duration and len(stamps) < MAX_FRAMES_HARD_CAP:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            t += probe
+            continue
+        
+        small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
+        cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+        
+        # 计算边缘密度（Canny边缘检测）
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = np.sum(edges > 0) / (edges.shape[0] * edges.shape[1])
+        
+        is_scene_cut = False
+        reason = ''
+        
+        if prev_hist is None:
+            is_scene_cut = True
+            reason = '首帧'
+        else:
+            # 1. HSV相关度检测
+            corr = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL)
+            if corr < threshold:
+                is_scene_cut = True
+                reason = f'HSV相关度低({corr:.3f})'
+            
+            # 2. 帧间差值检测（突然变化）
+            if prev_frame is not None and not is_scene_cut:
+                diff = np.abs(small.astype(np.float32) - prev_frame.astype(np.float32))
+                mean_diff = diff.mean()
+                if mean_diff > 50:  # 平均差值超过50（0-255范围）
+                    is_scene_cut = True
+                    reason = f'帧间差值大({mean_diff:.1f})'
+            
+            # 3. 边缘密度变化检测
+            if prev_edge_density is not None and not is_scene_cut:
+                edge_change = abs(edge_density - prev_edge_density)
+                if edge_change > 0.1:  # 边缘密度变化超过10%
+                    is_scene_cut = True
+                    reason = f'边缘密度变化({edge_change:.3f})'
+        
+        if is_scene_cut:
+            stamps.append(round(t, 2))
+            if len(reason) > 0:
+                _c('INFO', f'  镜头切换 @ {t:.1f}s ({reason})')
+        
+        prev_hist = hist
+        prev_frame = small.copy()
+        prev_edge_density = edge_density
+        t += probe
+    
+    return stamps
 
 
 # --------------------------------------------------------------------------- #
@@ -201,12 +599,17 @@ def extract_frames(
     min_frames: int = 0,
     save_images: bool = False,
     image_dir: Optional[str] = None,
+    quality_config: Optional[dict] = None,
+    dedup_config: Optional[dict] = None,
+    scene_enhanced: bool = False,
 ) -> list[tuple[float, str]]:
     """抽取视频帧，可选保存图片文件用于生成带截图的笔记报告。
 
     Args:
         save_images: 是否将帧保存为 JPG 文件
         image_dir: 图片保存目录（默认为视频同目录下的 _frames 子目录）
+        quality_config: 帧质量过滤配置（None=不启用）
+        scene_enhanced: 是否使用增强版镜头检测（综合多维度）
     Returns:
         (时间戳, base64) 列表；若 save_images=True，额外设置全局 _FRAME_FILES 映射
     """
@@ -229,8 +632,13 @@ def extract_frames(
         image_dir = os.path.expanduser(image_dir)
         os.makedirs(image_dir, exist_ok=True)
 
+    # 根据是否增强版选择不同的镜头检测函数
     if duration > 0 and sample_mode == 'scene':
-        timestamps = _detect_scene_timestamps(cap, duration, max(0.5, scene_probe), scene_threshold)
+        if scene_enhanced:
+            _c('INFO', f'使用增强版镜头检测（综合HSV+帧间差值+边缘变化）...')
+            timestamps = _detect_scene_timestamps_enhanced(cap, duration, max(0.5, scene_probe), scene_threshold)
+        else:
+            timestamps = _detect_scene_timestamps(cap, duration, max(0.5, scene_probe), scene_threshold)
         if not timestamps:
             timestamps = [0.0]
     elif duration > 0:
@@ -301,10 +709,27 @@ def extract_frames(
     cap.release()
     
     # 内容去重（如果启用）
-    dedup_enabled = defaults.get('dedup_enabled', DEFAULT_DEDUP_ENABLED) if 'defaults' in dir() else DEFAULT_DEDUP_ENABLED
-    if dedup_enabled and _HAVE_PERCEPTUAL_HASH and out:
-        dedup_threshold = defaults.get('dedup_threshold', DEFAULT_DEDUP_THRESHOLD) if 'defaults' in dir() else DEFAULT_DEDUP_THRESHOLD
-        out, out_images = deduplicate_frames(out, out_images, dedup_threshold)
+    if dedup_config and dedup_config.get('enabled', False) and _HAVE_PERCEPTUAL_HASH and out:
+        dedup_threshold = dedup_config.get('threshold', DEFAULT_DEDUP_THRESHOLD)
+        # 需要重新读取帧图像用于去重计算
+        out_images_for_dedup = []
+        for ts, b64 in out:
+            try:
+                img_data = base64.b64decode(b64)
+                img_array = np.frombuffer(img_data, dtype=np.uint8)
+                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    out_images_for_dedup.append(frame)
+                else:
+                    out_images_for_dedup.append(None)
+            except Exception:
+                out_images_for_dedup.append(None)
+        
+        out, out_images_for_dedup = deduplicate_frames(out, out_images_for_dedup, dedup_threshold)
+    
+    # 帧质量过滤（如果启用）
+    if quality_config and quality_config.get('enabled', False):
+        out = filter_frames_by_quality(out, quality_config)
     
     return out
 
@@ -1316,19 +1741,119 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
              f'分辨率 {meta["resolution"]} | {meta["fps"]}fps | 编码 {meta["codec"]} | {meta["size_mb"]}MB')
 
     # 2) 抽帧（按 sample_mode 选择抽样策略；可「时间换精度」）
-    _min_hint = f'，最少保底 {min_frames} 帧' if min_frames else ''
-    if sample_mode == 'interval':
-        _c('INFO', f'抽帧方式：时间跨度，每 {interval:g}s 一帧（安全上限 {MAX_FRAMES_HARD_CAP} 帧{_min_hint}）')
-    elif sample_mode == 'count':
-        _c('INFO', f'抽帧方式：固定张数，全片均匀 {max_frames} 帧')
-    elif sample_mode == 'scene':
-        _c('INFO', f'抽帧方式：镜头切换检测（每 {scene_probe:g}s 探测，相关度<{scene_threshold:g} 判为新镜头，上限 {MAX_FRAMES_HARD_CAP} 帧{_min_hint}）')
-    else:
-        _c('INFO', f'抽帧方式：自动（≤{max_frames} 帧且不密于 {interval:g}s{_min_hint}）')
+    # 检查是否需要分段处理（长视频）
+    segment_enabled = bool(task.get('segment_enabled', defaults.get('segment_enabled', DEFAULT_SEGMENT_ENABLED)))
+    segment_duration = float(task.get('segment_duration', defaults.get('segment_duration', DEFAULT_SEGMENT_DURATION)))
+    segment_overlap = float(task.get('segment_overlap', defaults.get('segment_overlap', DEFAULT_SEGMENT_OVERLAP)))
     
-    # 读取去重配置
+    frames = []
+    if segment_enabled and meta['duration_sec'] > segment_duration:
+        # 长视频分段处理
+        _c('INFO', f'长视频分段处理已启用（每段{segment_duration}秒，重叠{segment_overlap}秒）')
+        segments = split_video_for_processing(video_path, segment_duration, segment_overlap)
+        
+        all_frame_results = []
+        for seg_idx, (seg_start, seg_end) in enumerate(segments):
+            _c('INFO', f'  处理第 {seg_idx+1}/{len(segments)} 段（{seg_start:.1f}s - {seg_end:.1f}s）')
+            
+            seg_frames = extract_frames_from_segment(
+                video_path, seg_start, seg_end,
+                max(0.5, interval), max_frames, sample_mode,
+                scene_threshold, scene_probe, min_frames,
+                save_images=notebook_mode, image_dir=_img_dir,
+                quality_config=quality_config,
+                dedup_config=dedup_config,
+                scene_enhanced=scene_enhanced
+            )
+            
+            if seg_frames:
+                all_frame_results.extend(seg_frames)
+                _c('INFO', f'    段 {seg_idx+1} 抽取 {len(seg_frames)} 帧')
+        
+        # 去重（跨段去重）
+        if dedup_config and dedup_config.get('enabled', False) and all_frame_results:
+            _c('INFO', f'跨段去重：对 {len(all_frame_results)} 帧进行去重...')
+            # 重新计算哈希并去重
+            deduplicated = []
+            hashes = []
+            for ts, b64 in all_frame_results:
+                try:
+                    img_data = base64.b64decode(b64)
+                    img_array = np.frombuffer(img_data, dtype=np.uint8)
+                    frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        hash_val = _perceptual_hash(frame)
+                        if hash_val:
+                            is_dup = False
+                            for existing_hash in hashes:
+                                if _hamming_distance(hash_val, existing_hash) < dedup_threshold:
+                                    is_dup = True
+                                    break
+                            if not is_dup:
+                                deduplicated.append((ts, b64))
+                                hashes.append(hash_val)
+                        else:
+                            deduplicated.append((ts, b64))
+                except Exception:
+                    deduplicated.append((ts, b64))
+            
+            _c('OK', f'跨段去重完成：{len(all_frame_results)} 帧 → {len(deduplicated)} 帧')
+            frames = deduplicated
+        else:
+            frames = all_frame_results
+        
+        _c('OK', f'分段处理完成：共抽取 {len(frames)} 帧')
+    else:
+        # 普通处理（不分段的原有逻辑）
+        _min_hint = f'，最少保底 {min_frames} 帧' if min_frames else ''
+        if sample_mode == 'interval':
+            _c('INFO', f'抽帧方式：时间跨度，每 {interval:g}s 一帧（安全上限 {MAX_FRAMES_HARD_CAP} 帧{_min_hint}）')
+        elif sample_mode == 'count':
+            _c('INFO', f'抽帧方式：固定张数，全片均匀 {max_frames} 帧')
+        elif sample_mode == 'scene':
+            _c('INFO', f'抽帧方式：镜头切换检测（每 {scene_probe:g}s 探测，相关度<{scene_threshold:g} 判为新镜头，上限 {MAX_FRAMES_HARD_CAP} 帧{_min_hint}）')
+        else:
+            _c('INFO', f'抽帧方式：自动（≤{max_frames} 帧且不密于 {interval:g}s{_min_hint}）')
+        
+        frames = extract_frames(
+            video_path, max(0.5, interval), max_frames, sample_mode,
+            scene_threshold, scene_probe, min_frames,
+            save_images=notebook_mode, image_dir=_img_dir,
+            quality_config=quality_config,
+            dedup_config=dedup_config,
+            scene_enhanced=scene_enhanced
+        )
+    
+    # 读取去重配置（用于日志显示）
     dedup_enabled = bool(task.get('dedup_enabled', defaults.get('dedup_enabled', DEFAULT_DEDUP_ENABLED)))
     dedup_threshold = int(task.get('dedup_threshold', defaults.get('dedup_threshold', DEFAULT_DEDUP_THRESHOLD)))
+    
+    # 读取增强scene检测配置
+    scene_enhanced = bool(task.get('scene_enhanced', defaults.get('scene_enhanced', False)))
+    if scene_enhanced and sample_mode == 'scene':
+        _c('INFO', '增强版镜头检测已启用（综合多维度）')
+    
+    # 读取帧质量过滤配置
+    quality_filter_enabled = bool(task.get('quality_filter_enabled', defaults.get('quality_filter_enabled', DEFAULT_QUALITY_FILTER_ENABLED)))
+    quality_config = None
+    if quality_filter_enabled:
+        quality_config = {
+            'enabled': True,
+            'blur_threshold': float(task.get('quality_blur_threshold', defaults.get('quality_blur_threshold', DEFAULT_QUALITY_BLUR_THRESHOLD))),
+            'dark_threshold': float(task.get('quality_dark_threshold', defaults.get('quality_dark_threshold', DEFAULT_QUALITY_DARK_THRESHOLD))),
+            'bright_threshold': float(task.get('quality_bright_threshold', defaults.get('quality_bright_threshold', DEFAULT_QUALITY_BRIGHT_THRESHOLD))),
+            'static_threshold': float(task.get('quality_static_threshold', defaults.get('quality_static_threshold', DEFAULT_QUALITY_STATIC_THRESHOLD))),
+        }
+        _c('INFO', f'帧质量过滤已启用（模糊阈值={quality_config["blur_threshold"]}，亮度范围={quality_config["dark_threshold"]}-{quality_config["bright_threshold"]}）')
+    
+    # 读取去重配置
+    dedup_config = None
+    if dedup_enabled:
+        dedup_config = {
+            'enabled': True,
+            'threshold': dedup_threshold,
+        }
+        _c('INFO', f'内容去重已启用（阈值={dedup_threshold}）')
     
     # 笔记模式：确定帧图片保存目录
     _img_dir = None
@@ -1342,7 +1867,10 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     frames = extract_frames(
         video_path, max(0.5, interval), max_frames, sample_mode,
         scene_threshold, scene_probe, min_frames,
-        save_images=notebook_mode, image_dir=_img_dir
+        save_images=notebook_mode, image_dir=_img_dir,
+        quality_config=quality_config,
+        dedup_config=dedup_config,
+        scene_enhanced=scene_enhanced
     )
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
@@ -1545,6 +2073,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
             transcript=transcript, srt_path=srt_path, output_dir=output_dir,
             ocr_results=ocr_results if ocr_enabled else None,
             notebook_mode=notebook_mode,
+            notebook_style=notebook_style,
         )
         _c('OK', f'报告已保存 → {report_path}')
 
@@ -1553,9 +2082,14 @@ def write_report(video_path, model, summary_model, meta, frame_results, summary,
                  transcript: str = '', srt_path: Optional[str] = None,
                  output_dir: Optional[str] = None,
                  ocr_results: Optional[dict] = None,
-                 notebook_mode: bool = False) -> str:
+                 notebook_mode: bool = False,
+                 notebook_style: str = 'education') -> str:
     """写分析报告，支持笔记模式（嵌入帧截图）。"""
-    report_path = f'{_out_base(video_path, output_dir)}.analysis.md'
+    # 笔记模式使用不同的文件后缀
+    if notebook_mode:
+        report_path = f'{_out_base(video_path, output_dir)}.notebook.md'
+    else:
+        report_path = f'{_out_base(video_path, output_dir)}.analysis.md'
     
     # 计算相对路径（用于Markdown图片引用）
     def _img_rel_path(img_abs_path: str) -> str:
@@ -1566,64 +2100,121 @@ def write_report(video_path, model, summary_model, meta, frame_results, summary,
         except Exception:
             return os.path.basename(img_abs_path)
 
-    lines = [
-        '# 视频离线分析报告 / Video Analysis Report',
-        '',
-        f'- 源文件 / Source: `{os.path.basename(video_path)}`',
-        f'- 生成时间 / Generated: {datetime.now().isoformat(timespec="seconds")}',
-        f'- 视觉模型 / Vision model: `{model}`',
-        f'- 汇总模型 / Summary model: `{summary_model}`',
-        f'- 耗时 / Elapsed: {elapsed:.2f}s',
-        '',
-        '## 主要参数 / Key Parameters',
-        '',
-        f'- 时长 / Duration: {meta["duration_hms"]}（{meta["duration_sec"]}s）',
-        f'- 分辨率 / Resolution: {meta["resolution"]}',
-        f'- 帧率 / FPS: {meta["fps"]}',
-        f'- 总帧数 / Frames: {meta["frame_count"]}',
-        f'- 编码 / Codec: {meta["codec"]}',
-        f'- 文件大小 / Size: {meta["size_mb"]} MB',
-        '',
-        '---',
-        '',
-        summary,
-        '',
-    ]
-    if transcript:
-        lines += ['---', '', '## 音频转写 / Transcript', '']
-        if srt_path:
-            lines += [f'> 字幕文件 / SRT: `{os.path.basename(srt_path)}`', '']
-        lines += [transcript, '']
-    
-    # 添加OCR结果
-    if ocr_results:
-        lines += ['---', '', '## 画面文字识别(OCR) / On-screen Text Recognition', '']
-        lines += ['| 时间(s) | 识别的文字 |', '|---------|-----------|']
-        for ts in sorted(ocr_results.keys()):
-            text_regions = ocr_results[ts]
-            texts = [r[4] for r in text_regions if r[4]]
-            if texts:
-                # 笔记模式下，尝试嵌入对应时间的截图
-                img_markdown = ''
-                if notebook_mode and ts in _FRAME_FILES:
-                    img_path, img_name = _FRAME_FILES[ts]
-                    rel_path = _img_rel_path(img_path)
-                    img_markdown = f'\n<br>![截图@{ts:.1f}s]({rel_path})'
-                lines += [f'| {ts:.1f} | {"<br>".join(texts)}{img_markdown} |']
-        lines += ['', '']
-    
-    # 逐帧描述部分 - 笔记模式增强：嵌入截图
-    lines += ['---', '', '## 逐帧描述 / Per-frame descriptions', '']
-    for idx, ts, desc in frame_results:
-        lines += [f'### 帧 {idx} @ {ts:.1f}s', '']
+    # 笔记模式：生成结构化笔记
+    if notebook_mode:
+        lines = [
+            '# 📝 视频学习笔记 / Video Study Notes',
+            '',
+            f'> **视频**: `{os.path.basename(video_path)}`',
+            f'> **生成时间**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            f'> **时长**: {meta["duration_hms"]} | **分辨率**: {meta["resolution"]}',
+            f'> **分析模型**: {model}',
+            '',
+            '---',
+            '',
+        ]
         
-        # 笔记模式：在每帧描述前嵌入对应的截图
-        if notebook_mode and ts in _FRAME_FILES:
-            img_path, img_name = _FRAME_FILES[ts]
-            rel_path = _img_rel_path(img_path)
-            lines += [f'![帧{idx}截图@{ts:.1f}s]({rel_path})', '']
+        # 解析汇总内容，尝试提取知识点并嵌入截图
+        # 在笔记模式中，summary已经是由notebook_summary_prompt生成的结构化笔记
+        # 我们需要在处理后的报告中嵌入截图
         
-        lines += [desc, '']
+        # 先添加汇总内容
+        lines += [summary, '', '---', '']
+        
+        # 添加带截图的关键帧
+        lines += ['## 🖼️ 关键帧截图 / Key Frame Screenshots', '']
+        lines += ['> 以下是分析过程中抽取的关键帧截图，对应视频中的重要时间点。', '']
+        
+        for idx, ts, desc in frame_results:
+            # 转换时间戳格式
+            ts_str = time.strftime('%M:%S', time.gmtime(ts))
+            
+            lines += [f'### [{ts_str}] 帧 {idx + 1}', '']
+            
+            # 嵌入截图
+            if ts in _FRAME_FILES:
+                img_path, img_name = _FRAME_FILES[ts]
+                rel_path = _img_rel_path(img_path)
+                lines += [f'![截图@{ts_str}]({rel_path})', '']
+            
+            # 添加帧描述（简洁版）
+            # 尝试从desc中提取关键信息
+            desc_lines = desc.split('\n')
+            key_info = []
+            for line in desc_lines:
+                if line.strip() and not line.startswith('#'):
+                    key_info.append(line)
+            
+            if key_info:
+                lines += ['**帧描述**:', '> ' + '\n> '.join(key_info[:3]), '']
+            
+            lines += ['---', '']
+        
+        # 如果有OCR结果，添加文字识别部分
+        if ocr_results:
+            lines += ['## 📝 画面文字识别 / On-screen Text', '']
+            lines += ['| 时间 | 识别的文字 |', '|------|-----------|']
+            for ts in sorted(ocr_results.keys()):
+                text_regions = ocr_results[ts]
+                texts = [r[4] for r in text_regions if r[4]]
+                if texts:
+                    ts_str = time.strftime('%M:%S', time.gmtime(ts))
+                    lines += [f'| [{ts_str}] | {"<br>".join(texts)} |']
+            lines += ['', '']
+        
+        # 如果有音频转写，添加文字稿部分
+        if transcript:
+            lines += ['## 🎤 音频转写 / Audio Transcript', '']
+            if srt_path:
+                lines += [f'> 字幕文件: `{os.path.basename(srt_path)}`', '']
+            lines += [transcript, '']
+        
+    else:
+        # 普通分析模式（原有逻辑）
+        lines = [
+            '# 视频离线分析报告 / Video Analysis Report',
+            '',
+            f'- 源文件 / Source: `{os.path.basename(video_path)}`',
+            f'- 生成时间 / Generated: {datetime.now().isoformat(timespec="seconds")}',
+            f'- 视觉模型 / Vision model: `{model}`',
+            f'- 汇总模型 / Summary model: `{summary_model}`',
+            f'- 耗时 / Elapsed: {elapsed:.2f}s',
+            '',
+            '## 主要参数 / Key Parameters',
+            '',
+            f'- 时长 / Duration: {meta["duration_hms"]}（{meta["duration_sec"]}s）',
+            f'- 分辨率 / Resolution: {meta["resolution"]}',
+            f'- 帧率 / FPS: {meta["fps"]}',
+            f'- 总帧数 / Frames: {meta["frame_count"]}',
+            f'- 编码 / Codec: {meta["codec"]}',
+            f'- 文件大小 / Size: {meta["size_mb"]} MB',
+            '',
+            '---',
+            '',
+            summary,
+            '',
+        ]
+        if transcript:
+            lines += ['---', '', '## 音频转写 / Transcript', '']
+            if srt_path:
+                lines += [f'> 字幕文件 / SRT: `{os.path.basename(srt_path)}`', '']
+            lines += [transcript, '']
+        
+        # 添加OCR结果
+        if ocr_results:
+            lines += ['---', '', '## 画面文字识别(OCR) / On-screen Text Recognition', '']
+            lines += ['| 时间(s) | 识别的文字 |', '|---------|-----------|']
+            for ts in sorted(ocr_results.keys()):
+                text_regions = ocr_results[ts]
+                texts = [r[4] for r in text_regions if r[4]]
+                if texts:
+                    lines += [f'| {ts:.1f} | {"<br>".join(texts)} |']
+            lines += ['', '']
+        
+        # 逐帧描述部分
+        lines += ['---', '', '## 逐帧描述 / Per-frame descriptions', '']
+        for idx, ts, desc in frame_results:
+            lines += [f'### 帧 {idx} @ {ts:.1f}s', '', desc, '']
 
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
