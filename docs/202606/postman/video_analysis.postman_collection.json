@@ -1,0 +1,245 @@
+{
+  "info": {
+    "name": "Video LLM Analysis API (my-webui)",
+    "description": "本地离线视频大模型分析系统 my-webui 的 API 测试集合。\n所有 /api/v1/video/* 端点需要鉴权：在请求头带上 `Authorization: Bearer {{apiKey}}`。\n视频分析全程离线（Ollama 本地多模态模型），数据不出域。\n\n可用视觉模型（GET /models 动态获取）：gemma4:26b、llama3.2-vision:11b、minicpm-v:latest 等。\n\n导入方式：Postman → Import → 选择本文件。然后在集合的 Variables 中填写 baseUrl 与 apiKey。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:9102",
+      "type": "string"
+    },
+    {
+      "key": "apiKey",
+      "value": "sk-ab0cf13692424a4a812f3105dff3e4e4",
+      "type": "string"
+    },
+    {
+      "key": "videoPath",
+      "value": "/data/workspace/data/1.mp4",
+      "type": "string"
+    },
+    {
+      "key": "visionModel",
+      "value": "minicpm-v:latest",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      { "key": "token", "value": "{{apiKey}}", "type": "string" }
+    ]
+  },
+  "item": [
+    {
+      "name": "1. 健康检查 / Health",
+      "item": [
+        {
+          "name": "能力探测 (GET /video/health)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "health"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. 列出本地模型 / Models",
+      "item": [
+        {
+          "name": "可用视觉模型 (GET /video/models)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/models",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "models"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. 单视频分析 / Analyze",
+      "item": [
+        {
+          "name": "分析本地视频 (POST /video/analyze)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"video_path\": \"{{videoPath}}\",\n  \"model\": \"{{visionModel}}\",\n  \"summary_model\": \"\",\n  \"prompt\": \"\",\n  \"frame_interval\": 10,\n  \"max_frames\": 3,\n  \"min_frames\": 0,\n  \"concurrency\": 2,\n  \"language\": \"zh\",\n  \"include_audio\": false,\n  \"whisper_model\": \"\",\n  \"save_report\": true,\n  \"ollama_url\": \"\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/analyze",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "analyze"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "流式分析 SSE (POST /video/analyze/stream)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "text/event-stream" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"video_path\": \"{{videoPath}}\",\n  \"model\": \"{{visionModel}}\",\n  \"max_frames\": 3,\n  \"frame_interval\": 10,\n  \"concurrency\": 2,\n  \"language\": \"zh\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/analyze/stream",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "analyze", "stream"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. 上传并分析 / Upload",
+      "item": [
+        {
+          "name": "上传视频文件分析 (POST /video/analyze/upload)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": "" },
+                { "key": "model", "value": "{{visionModel}}", "type": "text" },
+                { "key": "language", "value": "zh", "type": "text" },
+                { "key": "max_frames", "value": "3", "type": "text" },
+                { "key": "concurrency", "value": "2", "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/analyze/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "analyze", "upload"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. 批量分析 / Batch",
+      "item": [
+        {
+          "name": "扫描目录 (POST /video/batch/scan)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"directory\": \"/data/workspace/data\",\n  \"recursive\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/batch/scan",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "batch", "scan"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "启动批量任务 (POST /video/batch)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"directory\": \"/data/workspace/data\",\n  \"model\": \"{{visionModel}}\",\n  \"recursive\": false,\n  \"skip_existing\": true,\n  \"max_frames\": 3,\n  \"frame_interval\": 10,\n  \"concurrency\": 2,\n  \"language\": \"zh\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/batch",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "batch"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "列出批量任务 (GET /video/batch)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/batch",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "batch"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "查询单个任务 (GET /video/batch/{job_id})",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/batch/{{job_id}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "batch", "{{job_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "取消任务 (POST /video/batch/{job_id}/cancel)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/batch/{{job_id}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "batch", "{{job_id}}", "cancel"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6. 历史记录 / History",
+      "item": [
+        {
+          "name": "获取分析历史 (GET /video/history)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/video/history",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "video", "history"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

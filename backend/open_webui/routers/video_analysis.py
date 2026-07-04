@@ -61,7 +61,7 @@ SUPPORTED_VIDEO_EXTS = {
 # A vision model can only digest a limited number of frames per request.
 DEFAULT_FRAME_INTERVAL = 5.0  # seconds between sampled frames
 DEFAULT_MAX_FRAMES = 16  # hard cap on frames per video
-DEFAULT_MIN_FRAMES = 20  # ensure at least this many frames (adaptive to duration); 0 = off
+DEFAULT_MIN_FRAMES = 0  # adaptive floor off by default (0 = off); previously 20 forced >=20 frames even for short clips, causing slow tests
 MAX_FRAME_EDGE = 768  # downscale long edge to keep base64 payloads small
 DEFAULT_CONCURRENCY = 3  # parallel vision requests against Ollama
 FRAMES_HARD_CAP = 64  # absolute upper bound on frames per request (payload/VRAM guard)
