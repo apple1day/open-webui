@@ -94,6 +94,18 @@ SUPPORTED_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.m4v', '.mpg
 # MLX 后端默认模型（Apple Silicon 原生；24GB 内存推荐 4bit 量化版）
 DEFAULT_MLX_VLM_MODEL = 'mlx-community/Qwen2.5-VL-7B-Instruct-4bit'   # 视觉（逐帧识别）
 DEFAULT_MLX_LM_MODEL = 'mlx-community/Qwen2.5-7B-Instruct-4bit'       # 文本（汇总）
+
+# 本地多模态 VLM 候选（均经 Ollama 运行，Apache 2.0 可商用）。
+# 当前默认用 MiniCPM-V；Google Gemma 4 多模态（本机已装 gemma4:26b）可作为更高效的
+# 本地化升级替代品，逐帧质量对比见 docs/202606/gemma4_local_upgrade.md。
+KNOWN_LOCAL_VLM_MODELS = (
+    'minicpm-v:latest',        # 当前默认：轻量多模态（~5GB）
+    'gemma4:26b',              # Google Gemma 4 多模态（已装，推荐本地升级）
+    'gemma4:12b',              # Gemma 4 中档（需 ollama pull）
+    'gemma4:4b',               # Gemma 4 轻量，低显存设备
+    'llama3.2-vision:11b',     # Meta 视觉模型（已装）
+    'qwen2.5-vl:7b',           # 阿里通义千问视觉
+)
 DEFAULT_FRAME_MAX_TOKENS = 300     # MLX 逐帧描述的最大生成 token
 DEFAULT_SUMMARY_MAX_TOKENS = 1200  # MLX 汇总的最大生成 token
 
@@ -112,6 +124,10 @@ DEFAULT_CACHE_DIR = '~/.video_analysis_cache'  # 缓存目录
 
 # GPU加速配置
 DEFAULT_GPU_ENABLED = True  # 是否启用GPU加速（如果可用）
+
+# 并发配置
+DEFAULT_CONCURRENCY = 3     # 默认并发帧分析数（与前端表单、video-tasks.json、后端路由保持一致）
+MAX_CONCURRENCY = 8         # 并发安全上限：避免 Ollama 显存/连接句柄被打爆
 
 # 笔记模式配置
 DEFAULT_NOTEBOOK_MODE = False  # 是否启用笔记模式（保存截图+结构化笔记）
@@ -1968,7 +1984,8 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     else:
         fp = frame_prompt(language, custom_prompt)
     
-    concurrency = int(task.get('concurrency', defaults.get('concurrency', 1)))  # 默认顺序处理
+    concurrency = int(task.get('concurrency', defaults.get('concurrency', DEFAULT_CONCURRENCY)))
+    concurrency = max(1, min(concurrency, MAX_CONCURRENCY))  # 安全上限，避免 Ollama 过载
     
     if concurrency > 1 and len(frames) > 1:
         # 并发处理

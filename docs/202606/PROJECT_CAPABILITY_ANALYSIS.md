@@ -88,7 +88,7 @@
 | **文件级缓存跳过** | `skip_existing` + `DEFAULT_CACHE_*` | `:1705`；`:110-111` |
 | **CLI 参数** | `--config / --ollama-url / --backend / --video-dir / --recursive / --skip-existing` 等 | `main :2263-2280` |
 
-> **注意**：脚本端 `concurrency` 默认 **1（顺序处理）**——`concurrency = int(task.get('concurrency', defaults.get('concurrency', 1)))`，见 `:1877` 注释"默认顺序处理"。
+> **已统一（P0）**：脚本端 `concurrency` 原默认 **1（顺序处理）**，现已改为 `DEFAULT_CONCURRENCY=3` 并 `max(1, min(..., MAX_CONCURRENCY=8))` 限 8，与前端表单、后端路由 `DEFAULT_CONCURRENCY=3` 一致（见 `scripts/video_tasks.py` 的 `DEFAULT_CONCURRENCY` / `MAX_CONCURRENCY`）。
 
 ### 4.2 后端 API `backend/open_webui/routers/video_analysis.py`（约 1400+ 行）—— 编排能力全在它身上
 
@@ -125,7 +125,7 @@
 | `history/+page.svelte` | 7.25 KB | 历史记录子页 |
 | `lib/apis/video/index.ts` | 6.97 KB | fetch 封装：`getVideoHealth / getVideoModels / analyzeVideo / analyzeVideoStream(SSE) / scanVideoDirectory / startVideoBatch / getVideoBatch / listVideoBatches / cancel/pause/resume/retry / getVideoHistory / deleteVideoHistory`；类型 `VideoAnalyzeForm / BatchAnalyzeForm / VideoHistoryItem` |
 
-> **前端 - 后端 concurrency 不一致**：前端表单 `concurrency` 默认 3，后端脚本端默认 1（顺序）。这是一个应统一的配置缺口。
+> **前端 - 后端 - 脚本 三端 concurrency 已统一（P0）**：默认 3、上限 8，缺口已消除。详见 `gemma4_local_upgrade.md`。
 
 ---
 
