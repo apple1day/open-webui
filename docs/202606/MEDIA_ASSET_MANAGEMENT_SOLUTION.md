@@ -130,15 +130,30 @@
 
 > 来源：腾讯视频 TVKPlayer 项目知识库（`source/api/asset/vod/`、`source/feature/vod/`、`source/capability/`）
 
-#### 2.2.1 加密类型枚举
+#### 2.2.1 加密类型三套枚举（修正：第一版将三套混为单一 `TVKVodCryptoType`，与代码不符）
 
+> 修正来源：`TVKPlayer` 知识库（`source/api/common/tvk_drm_type.h`、`source/cgi/api/tvk_cgi_defines.h`）。它们是**三套独立枚举**，分别回答"当前用哪个 / 设备支持哪些 / 多 DRM 能力"，而非一个连续枚举。
+
+**① `TVKDrmType` —— 当前用哪个（普通枚举，`tvk_drm_type.h`）**
 ```
-kNone=0  kCommon=1(普通DRM)  kTaiHe=2(数字太和)  kChacha20=3
-kFairPlay=4(iOS)  kWidevine=5(Android)  kChinaDrm=6  kChinaDrm2_0=7
-kPlayReady=8(Win)  kMultiDrm=9  kTXVDrm=10(腾讯视频自研DRM)
+kDrmTypeNone=-1(未加密)  kDrmTypeWidevine=0  kDrmTypeUnitend=1(数字太和/ChinaDrm)
+kDrmTypeChinaDrm20=2     kDrmTypeFairplay=3  kDrmTypeSelfDeveloped=4(腾讯视频自研)
 ```
 
-**关键发现**：加密类型与 DRM 方案解耦——`kMultiDrm` 可以是 Widevine+PlayReady+FairPlay+ChinaDRM 的任意组合，`kTXVDrm` 是腾讯视频自研 DRM。
+**② `TVKDrmSupportType` —— 设备支持哪些（位掩码，`tvk_cgi_defines.h`）**
+```
+kSupportCommonDrm=0x1     kSupportFakeDrm=0x2       kSupportTaiHeDrm=0x4
+kSupportChaCha20Drm=0x8   kSupportFairplayDrm=0x10  kSupportWidevineDrm=0x20
+kSupportSelfChinaDrm=0x40 kSupportChinaDrm20=0x80   kSupportPlayreadyDrm=0x100
+kSupportMultiDrm=0x200    kSupportTXVDrm=0x400
+```
+
+**③ `TVKMultiDrmSupportType` —— Multi-DRM 能力（位掩码，`tvk_cgi_defines.h`）**
+```
+kSupportFairplayMultiDrm=0x10  kSupportWidevineMultiDrm=0x20  kSupportChinaDrm20MultiDrm=0x80
+```
+
+**关键发现**：加密类型与 DRM 方案解耦——"当前用哪个"（`TVKDrmType`）与"设备支持哪些"（`TVKDrmSupportType` 位掩码）是两套独立维度；`kSupportMultiDrm` 可组合 Widevine+PlayReady+FairPlay+ChinaDRM 任意子集，`kSupportTXVDrm` 是腾讯视频自研 DRM。外加 `GetDrmCapability()` 前置查询 + L1(硬件 TEE)/L3(软件) 安全分级 + `kPlayControlEnableDrmLevelControl=0x1000`（后台按安全级别限清晰度）。这套"**能力位掩码 + 当前枚举 + 能力查询前置 + 安全降级**"范式，正是 `my-webui` 下一阶段要移植的核心模式（见 `tvkplayer_architecture_playbook.md`）。
 
 #### 2.2.2 Feature 接口模式
 

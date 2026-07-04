@@ -14,15 +14,19 @@
 #   MODEL=minicpm-v:latest ./analyze-remote.sh clip.mov
 #   ARGS: --audio  --max N  --min N  --lang zh|en  --save  --json
 #
-# 配置(可用环境变量覆盖)：
-#   API_BASE  默认 http://jiayinghou-any9.devcloud.woa.com:9102
-#   API_KEY   必填，服务器 API Key (sk-...)
+# 配置(必须用环境变量注入，脚本不保留任何默认值/密钥/内网地址)：
+#   API_BASE   必填，分析服务器地址，例如 https://your-analysis-host:9102
+#   API_KEY    必填，服务器 API Key (sk-...)
 #   MODEL / SUMMARY_MODEL  可选，留空由服务器自动选用可用视觉模型
 # =============================================================================
 set -uo pipefail
 
-API_BASE="${API_BASE:-http://jiayinghou-any9.devcloud.woa.com:9102}"
-API_KEY="${API_KEY:-sk-ab0cf13692424a4a812f3105dff3e4e4}"   # 请替换为你自己的 Key
+# 安全：API_BASE / API_KEY 均不得硬编码提交。请在运行环境通过环境变量注入，例如：
+#   export API_BASE=https://your-analysis-host:9102
+#   export API_KEY=sk-xxxx
+# 脚本本身不保留任何密钥或内网地址。
+API_BASE="${API_BASE:-}"   # 必填：分析服务器地址，通过环境变量注入
+API_KEY="${API_KEY:-}"    # 必填：服务器 API Key，通过环境变量注入，切勿提交到版本库
 MODEL="${MODEL:-}"
 SUMMARY_MODEL="${SUMMARY_MODEL:-}"
 
@@ -42,7 +46,8 @@ done
 
 [[ -z "$VIDEO" ]] && { echo "用法: $0 /path/to/video.mp4 [--audio --max N --min N --lang zh|en --save --json]"; exit 2; }
 [[ -f "$VIDEO" ]] || { echo "[ERR] 文件不存在: $VIDEO"; exit 1; }
-[[ -z "$API_KEY" || "$API_KEY" == sk-ab0cf1369* ]] && echo "[WARN] 正在使用示例 API_KEY，建议用自己的: export API_KEY=sk-xxxx"
+[[ -z "$API_BASE" ]] && { echo "[ERR] 未设置 API_BASE（服务器地址）。请用环境变量注入：export API_BASE=https://your-host:9102"; exit 2; }
+[[ -z "$API_KEY" ]]  && { echo "[ERR] 未设置 API_KEY。请用环境变量注入：export API_KEY=sk-xxxx（切勿硬编码到脚本/版本库）"; exit 2; }
 
 echo "[INFO] 上传分析: $VIDEO  ->  $API_BASE"
 echo "[INFO] 参数: lang=$LANG_OPT max_frames=$MAXF min_frames=$MINF audio=$AUDIO save=$SAVE model=${MODEL:-auto}"

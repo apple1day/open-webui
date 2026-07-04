@@ -130,6 +130,100 @@ DEFAULT_SEGMENT_DURATION = 600.0  # 每段时长（秒），默认10分钟
 DEFAULT_SEGMENT_OVERLAP = 30.0    # 段间重叠时长（秒），避免切分关键内容
 
 # --------------------------------------------------------------------------- #
+# P1-a) 任务能力位掩码（移植自 TVKPlayer 的 TVKDrmSupportType 位掩码范式）
+# 用位掩码表达「本机/任务具备哪些高级能力」，能力查询前置 → 缺失即安全降级。
+# 设计参见 docs/202606/tvkplayer_architecture_playbook.md（机制 A）。
+# --------------------------------------------------------------------------- #
+class VideoTaskCap:
+    """任务/设备高级能力位掩码（每个能力占一位，可自由组合）。"""
+    NONE = 0
+    SCENE_ENHANCED = 0x1   # 增强版镜头检测（纯 Python，恒可用）
+    DEDUP = 0x2            # 感知哈希去重（需 PIL + numpy）
+    QUALITY_FILTER = 0x4   # 帧质量过滤（纯 Python，恒可用）
+    OCR = 0x8              # 硬字幕 OCR（需 PaddleOCR）
+    ASR = 0x10             # 音频转写（需 faster-whisper）
+    NOTEBOOK = 0x20        # 笔记模式（纯 Python，恒可用）
+    SEGMENT = 0x40         # 长视频分段（纯 Python，恒可用）
+    GPU = 0x80             # GPU 加速（需可用 GPU）
+    MLX = 0x100            # Apple Silicon MLX 后端（需 mlx_vlm/mlx_lm）
+    CACHE = 0x200          # 文件级缓存（纯 Python，恒可用）
+
+
+def _cap_to_labels(cap: int) -> str:
+    """把能力位掩码转成可读标签串，便于日志。"""
+    labels = []
+    for bit, name in (
+        (VideoTaskCap.DEDUP, '去重'), (VideoTaskCap.OCR, 'OCR'),
+        (VideoTaskCap.ASR, '转写'), (VideoTaskCap.GPU, 'GPU'),
+        (VideoTaskCap.MLX, 'MLX'),
+    ):
+        if cap & bit:
+            labels.append(name)
+    return '、'.join(labels) if labels else '基础（仅逐帧+汇总）'
+
+
+def detect_device_capability() -> int:
+    """探测本机实际可用的高级能力，返回 ``VideoTaskCap`` 位掩码。
+
+    对应 TVKPlayer 的 ``GetDrmCapability()`` 前置查询：在调度层（main）调用一次，
+    把结果传给每个任务做能力对齐（缺失即安全降级），而非跑到一半才因缺依赖崩溃。
+
+    纯 Python 能力（质量过滤 / 镜头检测 / 笔记 / 分段 / 缓存）无外部依赖，
+    不在本探测范围——它们恒可用，由任务配置决定开关。
+    """
+    cap = VideoTaskCap.NONE
+    if _HAVE_PERCEPTUAL_HASH:
+        cap |= VideoTaskCap.DEDUP
+    if _HAVE_PADDLE_OCR:
+        cap |= VideoTaskCap.OCR
+    try:  # 仅确认依赖是否安装，不真正加载模型
+        import faster_whisper  # type: ignore  # noqa: F401
+        cap |= VideoTaskCap.ASR
+    except Exception:
+        pass
+    try:
+        has_gpu, _ = detect_gpu()
+        if has_gpu:
+            cap |= VideoTaskCap.GPU
+    except Exception:
+        pass
+    if sys.platform == 'darwin':
+        try:
+            import mlx_vlm  # type: ignore  # noqa: F401
+            import mlx_lm  # type: ignore  # noqa: F401
+            cap |= VideoTaskCap.MLX
+        except Exception:
+            pass
+    return cap
+
+
+def _reconcile_capabilities(task: dict, defaults: dict, device_cap: int) -> None:
+    """把任务「请求的」高级能力与「设备实际具备的」能力对齐（P1-a 安全降级）。
+
+    若任务开启了某能力但设备探测不到对应依赖，则就地关闭该能力并打 WARN，
+    避免 run_task 中途因缺依赖崩溃。纯 Python 能力不走此降级。
+    """
+    def _gate(key: str, cap_bit: int, label: str) -> None:
+        if task.get(key, defaults.get(key, False)) and not (device_cap & cap_bit):
+            _c('WARN', f'设备不支持 [{label}]，安全降级：本次关闭该能力')
+            task[key] = False
+
+    _gate('ocr_enabled', VideoTaskCap.OCR, '硬字幕 OCR (PaddleOCR)')
+    _gate('dedup_enabled', VideoTaskCap.DEDUP, '内容去重 (感知哈希)')
+    _gate('include_audio', VideoTaskCap.ASR, '音频转写 (faster-whisper)')
+    _gate('gpu_enabled', VideoTaskCap.GPU, 'GPU 加速')
+
+    # MLX 后端：要求 Apple Silicon 且已安装 mlx 库
+    vb = str(task.get('backend') or defaults.get('backend') or 'ollama').lower()
+    sb = str(task.get('summary_backend') or defaults.get('summary_backend') or vb).lower()
+    if (vb == 'mlx' or sb == 'mlx') and not (device_cap & VideoTaskCap.MLX):
+        _c('WARN', '请求 MLX 后端但设备不支持，安全降级：视觉/汇总回退到 ollama')
+        if vb == 'mlx':
+            task['backend'] = 'ollama'
+        if sb == 'mlx':
+            task['summary_backend'] = 'ollama'
+
+# --------------------------------------------------------------------------- #
 # 2.3) 长视频分段处理
 # 将长视频切分为多个片段分别处理，避免内存溢出和提高处理速度
 # --------------------------------------------------------------------------- #
@@ -2334,9 +2428,15 @@ def main() -> int:
     else:
         _c('INFO', f'共 {len(tasks)} 个视频任务，全部使用 MLX 后端（跳过 Ollama 探活）。')
 
+    # P1-a：能力查询前置。先探测一次本机能力，再按位掩码把每个任务的请求能力
+    # 与设备实际能力对齐（缺失即安全降级），避免 run_task 中途因缺依赖崩溃。
+    device_cap = detect_device_capability()
+    _c('INFO', f'设备能力探测：{_cap_to_labels(device_cap)}')
+
     for i, task in enumerate(tasks, 1):
         _c('INFO', f'==== 任务 {i}/{len(tasks)} ====')
         try:
+            _reconcile_capabilities(task, cfg, device_cap)
             run_task(task, cfg, ollama_url)
         except Exception as exc:
             _c('ERR', f'任务异常（{task.get("video_path", "?")}）：{exc}')
