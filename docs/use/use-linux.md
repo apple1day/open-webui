@@ -222,3 +222,5 @@ RUN_VIDEO_TASKS=1 USE_MYSQL=0 ./start-video-analysis.sh
 
 
 ./venv/bin/python scripts/video_tasks.py --config docs/json/yun-1.json --ollama-url http://localhost:11434
+
+./venv/bin/python scripts/video_tasks.py
