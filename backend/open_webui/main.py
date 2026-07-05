@@ -509,6 +509,7 @@ from open_webui.routers import (
     users,
     utils,
     video_analysis,
+    video_generation,
 )
 from open_webui.routers.retrieval import (
     get_ef,
@@ -1421,6 +1422,7 @@ app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
 
 app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
 app.include_router(video_analysis.router, prefix='/api/v1/video', tags=['video'])
+app.include_router(video_generation.router, prefix='/api/v1/video-gen', tags=['video-generation'])
 app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
 
 app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])

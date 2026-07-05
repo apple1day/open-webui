@@ -76,7 +76,7 @@
 	import HotkeyHint from '../common/HotkeyHint.svelte';
 
 	const BREAKPOINT = 768;
-	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace', 'video'];
+	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace', 'video', 'video-generation'];
 
 	let scrollTop = 0;
 
@@ -136,6 +136,8 @@
 				return $user?.role === 'admin';
 			case 'video':
 				return true;
+			case 'video-generation':
+				return true;
 			default:
 				return false;
 		}
@@ -148,7 +150,8 @@
 			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
 			calendar: { label: 'Calendar', href: '/calendar', iconType: 'calendar' },
 			playground: { label: 'Playground', href: '/playground', iconType: 'playground' },
-			video: { label: 'Video Analysis', href: '/video', iconType: 'video' }
+			video: { label: 'Video Analysis', href: '/video', iconType: 'video' },
+		'video-generation': { label: 'Video Generation', href: '/video-generation', iconType: 'video-generation' }
 		};
 		return items[id];
 	};
@@ -927,7 +930,7 @@
 											</svg>
 										{:else if itemId === 'playground'}
 											<Code className="size-4.5" />
-										{:else if itemId === 'video'}
+										{:else if itemId === 'video' || itemId === 'video-generation'}
 											<svg
 												xmlns="http://www.w3.org/2000/svg"
 												fill="none"
@@ -1191,12 +1194,12 @@
 												</svg>
 											{:else if itemId === 'playground'}
 												<Code className="size-4.5" strokeWidth="2" />
-											{:else if itemId === 'video'}
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													fill="none"
-													viewBox="0 0 24 24"
-													stroke-width="2"
+										{:else if itemId === 'video' || itemId === 'video-generation'}
+											<svg
+												xmlns="http://www.w3.org/2000/svg"
+												fill="none"
+												viewBox="0 0 24 24"
+												stroke-width="2"
 													stroke="currentColor"
 													class="size-4.5"
 												>
