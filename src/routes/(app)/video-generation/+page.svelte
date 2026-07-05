@@ -15,6 +15,9 @@
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import SidebarIcon from '$lib/components/icons/Sidebar.svelte';
+	import VideoTabNav from '$lib/components/video/VideoTabNav.svelte';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 
 	let loaded = false;
 	let ffmpegOk = false;
@@ -22,6 +25,10 @@
 	let sdStatus = '';
 	let models: string[] = [];
 	let sdModels: string[] = [];
+
+	// Cross-page: show indicator when prompt came from analysis
+	let promptFromAnalysis = false;
+	let pendingVideoPath = '';
 
 	// form
 	let prompt = '';
@@ -158,10 +165,26 @@
 	};
 
 	onMount(async () => {
+		// Check for cross-page navigation params
+		const params = $page.url.searchParams;
+		const promptParam = params.get('prompt');
+		if (promptParam) {
+			prompt = promptParam;
+			promptFromAnalysis = true;
+		}
 		await Promise.all([checkSDHealth(), getModels()]);
 		await loadHistory();
 		loaded = true;
 	});
+
+	// Navigate to analysis page with the generated video path
+	const analyzeGeneratedVideo = () => {
+		if (!current?.name) return;
+		// Construct the local file path for the generated video
+		const videoPath = `/data/workspace/data/video_generations/${current.name}`;
+		const params = new URLSearchParams({ video_path: videoPath });
+		goto(`/video?${params.toString()}`);
+	};
 </script>
 
 <svelte:head>
@@ -184,17 +207,21 @@
 			<div class="text-lg font-medium">AI 视频生成</div>
 			<div class="text-xs text-gray-400">Ollama · 本地 · 离线</div>
 			<div class="flex-1"></div>
-			<a
-				href="/video"
-				class="text-sm px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-			>
-				视频分析
-			</a>
+			<VideoTabNav />
 		</div>
 
 		{#if !ffmpegOk}
 			<div class="m-4 p-3 rounded-lg bg-yellow-50 text-yellow-800 text-sm">
 				后端未检测到 ffmpeg / ffprobe，视频生成将失败。请先安装 ffmpeg。
+			</div>
+		{/if}
+
+		{#if promptFromAnalysis}
+			<div class="mx-4 mb-2 p-3 rounded-lg bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-sm flex items-center justify-between">
+				<div>
+					<span class="font-medium">💡 来自视频分析的提示词已填入</span>
+				</div>
+				<button class="text-xs px-2 py-1 rounded hover:bg-blue-100 dark:hover:bg-blue-800" on:click={() => promptFromAnalysis = false}>×</button>
 			</div>
 		{/if}
 
@@ -430,6 +457,19 @@
 										{/each}
 									</ol>
 								{/if}
+							</div>
+						{/if}
+						{#if current}
+							<div class="flex gap-2 pt-2 border-t border-gray-100 dark:border-gray-800">
+								<button
+									class="text-xs px-3 py-1.5 rounded-lg bg-green-500 text-white hover:bg-green-600 transition flex items-center gap-1"
+									on:click={analyzeGeneratedVideo}
+								>
+									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+									</svg>
+									分析此视频
+								</button>
 							</div>
 						{/if}
 					</div>

@@ -10,12 +10,18 @@
 		startVideoBatch,
 		getVideoBatch,
 		cancelVideoBatch,
+		pauseVideoBatch,
+		resumeVideoBatch,
+		retryVideoBatch,
 		type VideoAnalyzeForm,
 		type BatchAnalyzeForm
 	} from '$lib/apis/video';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import SidebarIcon from '$lib/components/icons/Sidebar.svelte';
+	import VideoTabNav from '$lib/components/video/VideoTabNav.svelte';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 
 	const i18n: any = getContext('i18n');
 
@@ -46,6 +52,10 @@
 	let transcript = '';
 	let reportPath = '';
 	let elapsed = 0;
+
+	// Cross-page navigation: receive prompt from generation page, or video path from history
+	let pendingPrompt = '';
+	let pendingVideoPath = '';
 
 	const log = (msg: string) => {
 		logs = [...logs, msg];
@@ -164,6 +174,15 @@
 		transcript = '';
 		reportPath = '';
 		elapsed = 0;
+	};
+
+	// Navigate to generation page with analysis summary as prompt
+	const generateFromAnalysis = () => {
+		if (!summary) return;
+		// Extract key description from summary for generation prompt
+		const promptText = summary.length > 500 ? summary.substring(0, 500) + '...' : summary;
+		const params = new URLSearchParams({ prompt: promptText });
+		goto(`/video-generation?${params.toString()}`);
 	};
 
 	const run = async () => {
@@ -385,6 +404,18 @@
 	};
 
 	onMount(async () => {
+		// Check for cross-page navigation params
+		const params = $page.url.searchParams;
+		const videoPathParam = params.get('video_path');
+		const promptParam = params.get('prompt');
+		if (videoPathParam) {
+			videoPath = videoPathParam;
+			pendingVideoPath = videoPathParam;
+		}
+		if (promptParam) {
+			prompt = promptParam;
+			pendingPrompt = promptParam;
+		}
 		try {
 			const health = await getVideoHealth(localStorage.token);
 			opencvOk = health?.opencv ?? false;
@@ -432,12 +463,7 @@
 			<div class="text-lg font-medium">{$i18n.t('Offline Video Analysis')}</div>
 			<div class="text-xs text-gray-400">Ollama · local · offline</div>
 			<div class="flex-1"></div>
-			<a
-				href="/video/history"
-				class="text-sm px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-			>
-				{$i18n.t('History')}
-			</a>
+			<VideoTabNav />
 		</div>
 
 		{#if !opencvOk}

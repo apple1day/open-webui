@@ -5,6 +5,8 @@
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Tooltip from '$lib/components/icons/Tooltip.svelte';
 	import SidebarIcon from '$lib/components/icons/Sidebar.svelte';
+	import VideoTabNav from '$lib/components/video/VideoTabNav.svelte';
+	import { goto } from '$app/navigation';
 	import { getVideoHistory, deleteVideoHistory, type VideoHistoryItem } from '$lib/apis/video';
 
 	const i18n: any = getContext('i18n');
@@ -42,6 +44,20 @@
 	// View report
 	const viewReport = (item: VideoHistoryItem) => {
 		selectedItem = item;
+	};
+
+	// Re-analyze this video
+	const reAnalyze = (item: VideoHistoryItem) => {
+		const params = new URLSearchParams({ video_path: item.video_path });
+		goto(`/video?${params.toString()}`);
+	};
+
+	// Generate video based on this analysis
+	const generateFromHistory = (item: VideoHistoryItem) => {
+		if (!item.summary) return;
+		const promptText = item.summary.length > 500 ? item.summary.substring(0, 500) + '...' : item.summary;
+		const params = new URLSearchParams({ prompt: promptText });
+		goto(`/video-generation?${params.toString()}`);
 	};
 
 	// Close report modal
@@ -89,6 +105,7 @@
 			{/if}
 			<div class="text-lg font-medium">{$i18n.t('Video Analysis History')}</div>
 			<div class="flex-1"></div>
+			<VideoTabNav />
 			<button
 				class="text-sm px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
 				on:click={loadHistory}
@@ -146,6 +163,22 @@
 									>
 										{$i18n.t('View Report')}
 									</button>
+									<button
+										class="text-xs px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition"
+										on:click={() => reAnalyze(item)}
+										title="重新分析此视频"
+									>
+										重新分析
+									</button>
+									{#if item.summary}
+										<button
+											class="text-xs px-3 py-1.5 rounded-lg border border-green-200 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 transition"
+											on:click={() => generateFromHistory(item)}
+											title="基于此分析生成视频"
+										>
+											生成视频
+										</button>
+									{/if}
 									<button
 										class="text-xs px-3 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
 										on:click={() => deleteItem(item.video_path)}
