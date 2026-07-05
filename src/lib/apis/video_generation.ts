@@ -7,6 +7,7 @@ export type VideoGenForm = {
 	duration?: number;
 	resolution?: string;
 	fps?: number;
+	mode?: string; // "auto", "ai", "demo"
 };
 
 export type VideoGenResult = {
@@ -21,6 +22,8 @@ export type VideoGenResult = {
 	file_size: number;
 	mood: string;
 	motion: string;
+	generation_mode: string;
+	quality_score: number;
 	status?: string;
 };
 
@@ -33,6 +36,24 @@ export type VideoGenItem = {
 	fps: number;
 	file_size: number;
 	created_at: number;
+};
+
+export type VideoGenHealth = {
+	status: boolean;
+	ffmpeg: boolean;
+	ffprobe: boolean;
+	sd_available: boolean;
+	supported_exts: string[];
+	defaults: {
+		duration: number;
+		resolution: string;
+		fps: number;
+	};
+	generation_modes: {
+		ai: string;
+		demo: string;
+		auto: string;
+	};
 };
 
 const _request = async (token: string, path: string, method: string, body?: any) => {
@@ -58,7 +79,7 @@ const _request = async (token: string, path: string, method: string, body?: any)
 	return res;
 };
 
-export const getVideoGenHealth = (token: string) => _request(token, '/health', 'GET');
+export const getVideoGenHealth = (token: string) => _request(token, '/health', 'GET') as Promise<VideoGenHealth>;
 export const getVideoGenModels = (token: string) => _request(token, '/models', 'GET');
 export const enhancePrompt = (token: string, payload: VideoGenForm) =>
 	_request(token, '/enhance', 'POST', payload);

@@ -18,7 +18,10 @@
 
 	let loaded = false;
 	let ffmpegOk = false;
+	let sdAvailable = false;
+	let sdStatus = '';
 	let models: string[] = [];
+	let sdModels: string[] = [];
 
 	// form
 	let prompt = '';
@@ -27,6 +30,8 @@
 	let duration = 5;
 	let resolution = '512x512';
 	let fps = 24;
+	let mode = 'auto'; // "auto", "ai", "demo"
+	let showAdvanced = false;
 
 	// actions
 	let enhancing = false;
@@ -101,7 +106,8 @@
 				model: model || undefined,
 				duration: Number(duration),
 				resolution,
-				fps: Number(fps)
+				fps: Number(fps),
+				mode // 添加模式参数
 			});
 			current = res as VideoGenResult;
 			enhancedPrompt = res.enhanced_prompt;
@@ -128,13 +134,20 @@
 		}
 	};
 
-	onMount(async () => {
+	const checkSDHealth = async () => {
 		try {
 			const health = await getVideoGenHealth(token());
 			ffmpegOk = !!(health?.ffmpeg && health?.ffprobe);
+			sdAvailable = health?.sd_available ?? false;
+			sdStatus = health?.generation_modes?.ai?.includes('Stable Diffusion') 
+				? 'Stable Diffusion 可用 (AI 模式)' 
+				: 'Stable Diffusion 不可用';
 		} catch (e) {
 			console.error(e);
 		}
+	};
+
+	const getModels = async () => {
 		try {
 			const res = await getVideoGenModels(token());
 			models = (res?.models ?? []).filter((m: string) => !!m);
@@ -142,6 +155,10 @@
 		} catch (e) {
 			console.error(e);
 		}
+	};
+
+	onMount(async () => {
+		await Promise.all([checkSDHealth(), getModels()]);
 		await loadHistory();
 		loaded = true;
 	});
@@ -250,6 +267,49 @@
 					</div>
 				</div>
 
+				<div class="grid grid-cols-2 gap-2">
+					<div>
+						<div class="text-xs text-gray-500 mb-1">生成模式</div>
+						<select
+							class="w-full text-sm rounded-lg px-2 py-2 bg-gray-50 dark:bg-gray-850 outline-none"
+							bind:value={mode}
+						>
+							<option value="auto">自动选择（推荐）</option>
+							<option value="ai" disabled={!sdAvailable}>AI模式（Stable Diffusion）</option>
+							<option value="demo">演示模式（渐变动画）</option>
+						</select>
+						{#if mode === 'ai' && !sdAvailable}
+							<div class="text-xs text-red-500 mt-1">⚠️ Stable Diffusion 服务不可用</div>
+						{/if}
+					</div>
+					<div>
+						<div class="text-xs text-gray-500 mb-1">高级选项</div>
+						<button
+							class="w-full text-sm rounded-lg px-2 py-2 border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-850 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+							on:click={() => showAdvanced = !showAdvanced}
+							type="button"
+						>
+							{#if showAdvanced}隐藏高级选项{:else}显示高级选项{/if}
+						</button>
+					</div>
+				</div>
+
+				{#if showAdvanced}
+					<div class="rounded-lg border border-gray-50 dark:border-gray-850 p-3 space-y-2">
+						<div class="text-xs font-medium text-gray-500">高级选项</div>
+						<div class="text-xs text-gray-400">
+							{#if sdAvailable}
+								<span class="text-green-500">✓ Stable Diffusion 可用</span>: {sdStatus}
+							{:else}
+								<span class="text-yellow-500">⚠️ Stable Diffusion 不可用</span>: 将使用演示模式
+							{/if}
+						</div>
+						<div class="text-xs text-gray-400">
+							FFmpeg: {#if ffmpegOk}<span class="text-green-500">✓ 就绪</span>{:else}<span class="text-red-500">✗ 未找到</span>{/if}
+						</div>
+					</div>
+				{/if}
+
 				<div class="flex gap-2">
 					<button
 						class="flex-1 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm disabled:opacity-50 flex items-center justify-center gap-2"
@@ -316,6 +376,30 @@
 							<span>{current.fps} FPS</span>
 							{#if current.file_size}
 								<span>{(current.file_size / 1024 / 1024).toFixed(2)} MB</span>
+							{/if}
+							{#if current.generation_mode}
+								<span>模式: 
+									{#if current.generation_mode === 'ai_image_video' || current.generation_mode === 'sd_lora'}
+										<span class="text-green-500 font-medium">AI 模式</span>
+									{:else if current.generation_mode === 'demo'}
+										<span class="text-blue-500 font-medium">演示模式</span>
+									{:else}
+										{current.generation_mode}
+									{/if}
+								</span>
+							{/if}
+							{#if current.quality_score > 0}
+								<span>质量: 
+									{#if current.quality_score >= 80}
+										<span class="text-green-500 font-medium">优秀 ({current.quality_score})</span>
+									{:else if current.quality_score >= 60}
+										<span class="text-blue-500 font-medium">良好 ({current.quality_score})</span>
+									{:else if current.quality_score >= 40}
+										<span class="text-yellow-500 font-medium">一般 ({current.quality_score})</span>
+									{:else}
+										<span class="text-red-500 font-medium">较低 ({current.quality_score})</span>
+									{/if}
+								</span>
 							{/if}
 						</div>
 						{#if current.enhanced_prompt}
