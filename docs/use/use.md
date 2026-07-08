@@ -208,7 +208,9 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 ### 2026-6-25
 ```shell
 
-./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-4.json --ollama-url http://localhost:11434
+./venv/bin/python scripts/video_tasks.py --config docs/json/even-some3.json --ollama-url http://localhost:11434
+
+# even-path.json
 
 # 更新版本，增加抽帧次数
 ./venv/bin/python scripts/video_tasks.py --config docs/json/task-1-5cout.json --ollama-url http://localhost:11434
@@ -246,6 +248,11 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 
 # 16:33 再次进行，前面因为安装失败了。
 ./venv/bin/python scripts/video_tasks.py --backend mlx --summary-backend ollama
+
+
+./venv/bin/python scripts/video_tasks.py --config docs/json/even-path.json --ollama-url http://localhost:11434
+
+# 
 
 
 ```
