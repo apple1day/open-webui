@@ -2388,6 +2388,10 @@ def main() -> int:
                         help='配合 --video-dir：递归扫描子目录')
     parser.add_argument('--skip-existing', action='store_true',
                         help='跳过已生成同名 .analysis.md 报告的视频（增量分析）')
+    parser.add_argument('--watch', action='store_true',
+                        help='守护模式：持续监控 --video-dir，发现新视频自动分析（配合 --skip-existing 实现增量）')
+    parser.add_argument('--watch-interval', type=int, default=300,
+                        help='守护模式的扫描间隔（秒，默认300）。仅在 --watch 模式下生效')
     args = parser.parse_args()
 
     if not os.path.isfile(args.config):
@@ -2418,6 +2422,81 @@ def main() -> int:
         tasks = cfg.get('tasks', [])
     if not tasks:
         _c('WARN', 'video-tasks.json 中没有任务（tasks 为空），且未指定 --video-dir，跳过。')
+        return 0
+
+    # --watch 守护模式：持续监控目录，发现新视频自动分析。
+    # 注意：watch 模式在任务展开之前拦截，允许目录初始为空（等待新视频出现）。
+    if args.watch and args.video_dir:
+        watch_dir = os.path.expanduser(args.video_dir)
+        watch_interval = max(60, args.watch_interval)
+        _c('OK', f'守护模式启动：监控目录 {watch_dir}，每 {watch_interval}s 扫描一次（Ctrl+C 退出）')
+
+        # 确保配置中有 skip_existing
+        cfg['skip_existing'] = True
+
+        # 探活 Ollama（watch 模式也需要后端可用）
+        try:
+            urllib.request.urlopen(f'{ollama_url.rstrip("/")}/api/tags', timeout=10).read()
+        except Exception as exc:
+            _c('ERR', f'无法连接 Ollama（{ollama_url}）：{exc}')
+            return 1
+        _c('INFO', f'Ollama = {ollama_url}')
+
+        device_cap = detect_device_capability()
+        _c('INFO', f'设备能力探测：{_cap_to_labels(device_cap)}')
+
+        import signal
+        running = [True]
+
+        def _signal_handler(sig, frame):
+            _c('INFO', '收到退出信号，正在停止守护模式...')
+            running[0] = False
+
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
+
+        while running[0]:
+            try:
+                videos = _iter_videos(watch_dir, args.recursive)
+                new_videos = []
+                for vp in videos:
+                    report = f'{os.path.splitext(vp)[0]}.analysis.md'
+                    if not os.path.isfile(report):
+                        new_videos.append(vp)
+
+                if new_videos:
+                    _c('INFO', f'发现 {len(new_videos)} 个新视频，开始分析...')
+                    for vp in new_videos:
+                        if not running[0]:
+                            break
+                        task = {'video_path': vp}
+                        # 继承全局配置
+                        for k in ('model', 'summary_model', 'language', 'sample_mode',
+                                  'max_frames', 'min_frames', 'include_audio', 'whisper_model',
+                                  'concurrency', 'cache_enabled', 'gpu_enabled',
+                                  'scene_enhanced', 'dedup_enabled', 'quality_filter_enabled'):
+                            if k in cfg:
+                                task[k] = cfg[k]
+                        _c('INFO', f'==== 守护任务: {os.path.basename(vp)} ====')
+                        try:
+                            _reconcile_capabilities(task, cfg, device_cap)
+                            run_task(task, cfg, ollama_url)
+                        except Exception as exc:
+                            _c('ERR', f'守护任务异常（{vp}）：{exc}')
+                    _c('OK', f'本轮分析完成，{len(new_videos)} 个视频已处理')
+                else:
+                    _c('INFO', f'无新视频，等待下次扫描（{watch_interval}s）')
+
+                # 等待下次扫描（每秒检查退出信号）
+                for _ in range(watch_interval):
+                    if not running[0]:
+                        break
+                    time.sleep(1)
+            except Exception as exc:
+                _c('ERR', f'守护模式异常：{exc}')
+                time.sleep(10)
+
+        _c('OK', '守护模式已停止。')
         return 0
 
     # 把含 video_dir 的任务展开成「每个视频一个任务」

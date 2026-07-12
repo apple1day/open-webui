@@ -13,13 +13,25 @@
 		pauseVideoBatch,
 		resumeVideoBatch,
 		retryVideoBatch,
+		createSchedule,
+		listSchedules,
+		deleteSchedule,
+		triggerSchedule,
 		type VideoAnalyzeForm,
-		type BatchAnalyzeForm
+		type BatchAnalyzeForm,
+		type ScheduleForm,
+		type ScheduledTask
 	} from '$lib/apis/video';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import SidebarIcon from '$lib/components/icons/Sidebar.svelte';
 	import VideoTabNav from '$lib/components/video/VideoTabNav.svelte';
+	import TrainingPanel from '$lib/components/video/TrainingPanel.svelte';
+	import MonitorPanel from '$lib/components/video/MonitorPanel.svelte';
+	import VideoQA from '$lib/components/video/VideoQA.svelte';
+	import PipelinePanel from '$lib/components/video/PipelinePanel.svelte';
+	import DatasetPanel from '$lib/components/video/DatasetPanel.svelte';
+	import GenerationPanel from '$lib/components/video/GenerationPanel.svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 
@@ -56,6 +68,13 @@
 	// Cross-page navigation: receive prompt from generation page, or video path from history
 	let pendingPrompt = '';
 	let pendingVideoPath = '';
+
+	// L2: Large model integration
+	let largeModelVideoId: number | null = null;
+	let showAdvancedPanel = false;
+
+	// L4: Closed-loop pipeline
+	let showPipelinePanel = false;
 
 	const log = (msg: string) => {
 		logs = [...logs, msg];
@@ -251,8 +270,8 @@
 		}
 	};
 
-	// ---- mode: single video | directory batch ----
-	let mode: 'single' | 'batch' = 'single';
+	// ---- mode: single video | directory batch | automated schedule ----
+	let mode: 'single' | 'batch' | 'automated' = 'single';
 
 	// batch form state
 	let directory = '';
@@ -266,6 +285,12 @@
 	let jobId = '';
 	let job: any = null;
 	let pollTimer: any = null;
+
+	// ---- automated schedule state ----
+	let scheduleInterval = 300; // seconds
+	let schedules: ScheduledTask[] = [];
+	let schedulePollTimer: any = null;
+	let creatingSchedule = false;
 
 	const scanDir = async () => {
 		if (!directory.trim()) return toast.error($i18n.t('Please enter a directory path'));
@@ -403,6 +428,77 @@
 		}
 	};
 
+	// ---- automated schedule functions ----
+	const loadSchedules = async () => {
+		try {
+			const res = await listSchedules(localStorage.token);
+			schedules = res?.tasks ?? [];
+		} catch (e) {
+			console.error('Failed to load schedules', e);
+		}
+	};
+
+	const createAutomatedTask = async () => {
+		if (!directory.trim()) return toast.error($i18n.t('Please enter a directory path'));
+		if (!model) return toast.error($i18n.t('Please select a vision model'));
+		creatingSchedule = true;
+		try {
+			const payload: ScheduleForm = {
+				directory: directory.trim(),
+				model,
+				summary_model: summaryModel || undefined,
+				prompt: prompt || undefined,
+				frame_interval: Number(frameInterval),
+				max_frames: Number(maxFrames),
+				min_frames: Number(minFrames),
+				concurrency: Number(concurrency),
+				language,
+				include_audio: includeAudio,
+				whisper_model: whisperModel || undefined,
+				save_report: saveReport,
+				recursive,
+				skip_existing: skipExisting,
+				interval: Number(scheduleInterval)
+			};
+			await createSchedule(localStorage.token, payload);
+			toast.success($i18n.t('Automated task created — monitoring directory for new videos'));
+			await loadSchedules();
+		} catch (err: any) {
+			toast.error(typeof err === 'string' ? err : err?.detail ?? $i18n.t('Failed to create task'));
+		} finally {
+			creatingSchedule = false;
+		}
+	};
+
+	const removeSchedule = async (taskId: string) => {
+		try {
+			await deleteSchedule(localStorage.token, taskId);
+			toast.info($i18n.t('Automated task removed'));
+			await loadSchedules();
+		} catch (e: any) {
+			toast.error(e?.detail ?? $i18n.t('Failed to remove task'));
+		}
+	};
+
+	const triggerScheduleNow = async (taskId: string) => {
+		try {
+			await triggerSchedule(localStorage.token, taskId);
+			toast.success($i18n.t('Manual scan triggered'));
+			await loadSchedules();
+		} catch (e: any) {
+			toast.error(e?.detail ?? $i18n.t('Failed to trigger scan'));
+		}
+	};
+
+	const pollSchedules = async () => {
+		await loadSchedules();
+	};
+
+	const fmtTime = (ts: number | null): string => {
+		if (!ts) return '—';
+		return new Date(ts * 1000).toLocaleTimeString();
+	};
+
 	onMount(async () => {
 		// Check for cross-page navigation params
 		const params = $page.url.searchParams;
@@ -435,11 +531,15 @@
 		} catch (e) {
 			console.error(e);
 		}
+		// Load existing automated tasks
+		await loadSchedules();
+		schedulePollTimer = setInterval(pollSchedules, 5000);
 		loaded = true;
 	});
 
 	onDestroy(() => {
 		if (pollTimer) clearInterval(pollTimer);
+		if (schedulePollTimer) clearInterval(schedulePollTimer);
 	});
 </script>
 
@@ -472,7 +572,7 @@
 			</div>
 		{/if}
 
-		<!-- mode toggle: single video vs directory batch -->
+		<!-- mode toggle: single video vs directory batch vs automated schedule -->
 		<div class="px-4 pt-3">
 			<div class="inline-flex rounded-lg bg-gray-100 dark:bg-gray-850 p-0.5 text-sm">
 				<button
@@ -491,8 +591,58 @@
 				>
 					{$i18n.t('Directory batch')}
 				</button>
+				<button
+					class="px-3 py-1.5 rounded-md transition {mode === 'automated'
+						? 'bg-white dark:bg-gray-900 shadow font-medium'
+						: 'text-gray-500'}"
+					on:click={() => (mode = 'automated')}
+				>
+					{$i18n.t('Automated task')}
+				</button>
 			</div>
 		</div>
+
+		<!-- L2: Advanced Analysis Panel Toggle -->
+		<div class="px-4 pt-2 flex items-center gap-2">
+			<button
+				class="text-xs px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition flex items-center gap-1"
+				on:click={() => showAdvancedPanel = !showAdvancedPanel}
+			>
+				{showAdvancedPanel ? '收起高级分析' : '展开高级分析'}
+				<svg class="w-3 h-3 transition-transform {showAdvancedPanel ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+				</svg>
+			</button>
+			<button
+				class="text-xs px-3 py-1.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition flex items-center gap-1"
+				on:click={() => showPipelinePanel = !showPipelinePanel}
+			>
+				{showPipelinePanel ? '收起闭环流水线' : '展开闭环流水线'}
+				<svg class="w-3 h-3 transition-transform {showPipelinePanel ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+				</svg>
+			</button>
+		</div>
+
+		<!-- L2: Advanced Analysis Panels -->
+		{#if showAdvancedPanel}
+			<div class="mx-4 mb-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+				<TrainingPanel />
+				<MonitorPanel />
+				<VideoQA videoId={largeModelVideoId} />
+			</div>
+		{/if}
+
+		<!-- L4: Closed-Loop Pipeline Panels -->
+		{#if showPipelinePanel}
+			<div class="mx-4 mb-4 space-y-3">
+				<PipelinePanel />
+				<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+					<DatasetPanel videoId={largeModelVideoId} />
+					<GenerationPanel />
+				</div>
+			</div>
+		{/if}
 
 		<div class="flex-1 overflow-y-auto p-4 flex flex-col lg:flex-row gap-4">
 			<!-- Left: form -->
@@ -525,21 +675,38 @@
 							{$i18n.t('Skip already analyzed')}
 						</label>
 					</div>
-					<button
-						class="w-full py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm disabled:opacity-50 flex items-center justify-center gap-2"
-						disabled={scanning || batchRunning}
-						on:click={scanDir}
-					>
-						{#if scanning}
-							<Spinner className="size-4" />
+					{#if mode === 'batch'}
+						<button
+							class="w-full py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm disabled:opacity-50 flex items-center justify-center gap-2"
+							disabled={scanning || batchRunning}
+							on:click={scanDir}
+						>
+							{#if scanning}
+								<Spinner className="size-4" />
+							{/if}
+							{$i18n.t('Scan directory')}
+						</button>
+						{#if scanInfo}
+							<div class="text-xs text-gray-500">
+								{$i18n.t('Found {{count}} videos', { count: scanInfo.count })}{scanInfo.analyzed
+									? ` · ${scanInfo.analyzed} ${$i18n.t('already analyzed')}`
+									: ''}
+							</div>
 						{/if}
-						{$i18n.t('Scan directory')}
-					</button>
-					{#if scanInfo}
-						<div class="text-xs text-gray-500">
-							{$i18n.t('Found {{count}} videos', { count: scanInfo.count })}{scanInfo.analyzed
-								? ` · ${scanInfo.analyzed} ${$i18n.t('already analyzed')}`
-								: ''}
+					{/if}
+					{#if mode === 'automated'}
+						<div>
+							<div class="text-xs text-gray-500 mb-1">{$i18n.t('Scan interval (seconds)')}</div>
+							<input
+								type="number"
+								min="60"
+								step="60"
+								class="w-full text-sm rounded-lg px-3 py-2 bg-gray-50 dark:bg-gray-850 outline-none"
+								bind:value={scheduleInterval}
+							/>
+							<div class="text-xs text-gray-400 mt-1">
+								{$i18n.t('Every {{n}} seconds the directory is scanned for new videos', { n: scheduleInterval })}
+							</div>
 						</div>
 					{/if}
 				{/if}
@@ -650,8 +817,7 @@
 					<textarea
 						rows="2"
 						class="w-full text-sm rounded-lg px-3 py-2 bg-gray-50 dark:bg-gray-850 outline-none resize-none"
-						bind:value={prompt}
-					/>
+						bind:value={prompt}></textarea>
 				</div>
 
 				{#if mode === 'single'}
@@ -690,7 +856,7 @@
 							{/each}
 						</div>
 					{/if}
-				{:else}
+				{:else if mode === 'batch'}
 					<button
 						class="mt-1 w-full py-2 rounded-lg bg-black text-white dark:bg-white dark:text-black text-sm font-medium disabled:opacity-50 flex items-center justify-center gap-2"
 						disabled={batchRunning}
@@ -728,6 +894,23 @@
 							</button>
 						</div>
 					{/if}
+				{:else}
+					<!-- automated mode: create task button -->
+					<button
+						class="mt-1 w-full py-2 rounded-lg bg-black text-white dark:bg-white dark:text-black text-sm font-medium disabled:opacity-50 flex items-center justify-center gap-2"
+						disabled={creatingSchedule}
+						on:click={createAutomatedTask}
+					>
+						{#if creatingSchedule}
+							<Spinner className="size-4" />
+							{$i18n.t('Creating...')}
+						{:else}
+							{$i18n.t('Create automated task')}
+						{/if}
+					</button>
+					<div class="text-xs text-gray-400">
+						{$i18n.t('The task will continuously monitor the directory and automatically analyze any new videos found.')}
+					</div>
 				{/if}
 			</div>
 
@@ -797,7 +980,7 @@
 						{$i18n.t('Enter a local video path and start the offline analysis.')}
 					</div>
 				{/if}
-				{:else}
+				{:else if mode === 'batch'}
 					<!-- Batch results -->
 					{#if !job}
 						<div class="flex-1 flex items-center justify-center text-sm text-gray-400">
@@ -881,6 +1064,84 @@
 											{#if it.report_path}
 												<div class="text-xs text-gray-400 mt-2">{$i18n.t('Saved to')}: {it.report_path}</div>
 											{/if}
+										</details>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					{/if}
+				{:else}
+					<!-- Automated task list -->
+					{#if schedules.length === 0}
+						<div class="flex-1 flex items-center justify-center text-sm text-gray-400">
+							{$i18n.t('No automated tasks yet. Create one to continuously monitor a directory.')}
+						</div>
+					{:else}
+						<div class="rounded-xl border border-gray-50 dark:border-gray-850 divide-y divide-gray-50 dark:divide-gray-850">
+							{#each schedules as task (task.id)}
+								<div class="p-4">
+									<div class="flex items-center justify-between gap-2 mb-2">
+										<div class="flex items-center gap-2 min-w-0">
+											<span
+												class="shrink-0 inline-block w-2.5 h-2.5 rounded-full {task.status === 'active'
+													? 'bg-green-500'
+													: task.status === 'running'
+														? 'bg-blue-500 animate-pulse'
+														: task.status === 'cancelled'
+															? 'bg-gray-300'
+															: 'bg-gray-200'}"
+											></span>
+											<span class="text-sm font-medium truncate" title={task.directory}>{task.directory}</span>
+										</div>
+										<div class="flex items-center gap-2 shrink-0">
+											<button
+												class="text-xs px-2 py-1 rounded border border-blue-200 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition"
+												on:click={() => triggerScheduleNow(task.id)}
+											>
+												{$i18n.t('Trigger now')}
+											</button>
+											<button
+												class="text-xs px-2 py-1 rounded border border-red-200 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
+												on:click={() => removeSchedule(task.id)}
+											>
+												{$i18n.t('Remove')}
+											</button>
+										</div>
+									</div>
+									<div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-gray-500">
+										<div>
+											<span class="text-gray-400">{$i18n.t('Status')}:</span>
+											<span class="ml-1">{$i18n.t(task.status)}</span>
+										</div>
+										<div>
+											<span class="text-gray-400">{$i18n.t('Interval')}:</span>
+											<span class="ml-1">{task.interval}s</span>
+										</div>
+										<div>
+											<span class="text-gray-400">{$i18n.t('Last run')}:</span>
+											<span class="ml-1">{fmtTime(task.last_run)}</span>
+										</div>
+										<div>
+											<span class="text-gray-400">{$i18n.t('Next run')}:</span>
+											<span class="ml-1">{fmtTime(task.next_run)}</span>
+										</div>
+									</div>
+									<div class="text-xs text-gray-500 mt-2">
+										<span class="text-gray-400">{$i18n.t('Analyzed')}:</span>
+										<span class="ml-1 font-medium text-green-600">{task.total_analyzed}</span>
+										{#if task.last_batch_id}
+											<span class="ml-3 text-gray-400">{$i18n.t('Last batch')}:</span>
+											<span class="ml-1 font-mono">{task.last_batch_id.slice(0, 8)}</span>
+										{/if}
+									</div>
+									{#if task.params && Object.keys(task.params).length > 0}
+										<details class="mt-2">
+											<summary class="text-xs text-gray-400 cursor-pointer select-none">{$i18n.t('Parameters')}</summary>
+											<div class="text-xs text-gray-500 mt-1 grid grid-cols-2 gap-1">
+												{#each Object.entries(task.params) as [key, val]}
+													<div><span class="text-gray-400">{key}:</span> {val}</div>
+												{/each}
+											</div>
 										</details>
 									{/if}
 								</div>

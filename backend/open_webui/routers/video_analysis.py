@@ -1278,6 +1278,254 @@ async def analyze_uploaded_video(
     return result
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Scheduled / automated directory analysis tasks
+# --------------------------------------------------------------------------- #
+# The web UI can create "automated" tasks that periodically scan a directory
+# for new (un-analyzed) videos and analyze them in background. This enables
+# a "drop a video in a folder → get a report automatically" workflow.
+# --------------------------------------------------------------------------- #
+_SCHEDULED_TASKS: "dict[str, dict]" = {}
+_SCHEDULED_MAX = 10  # max concurrent scheduled tasks
+
+
+class ScheduleForm(BaseModel):
+    """Payload for POST /schedule — create an automated directory watch task."""
+    directory: str
+    model: str
+    summary_model: Optional[str] = None
+    prompt: Optional[str] = None
+    frame_interval: float = DEFAULT_FRAME_INTERVAL
+    max_frames: int = DEFAULT_MAX_FRAMES
+    min_frames: int = DEFAULT_MIN_FRAMES
+    concurrency: int = DEFAULT_CONCURRENCY
+    language: str = 'zh'
+    include_audio: bool = False
+    whisper_model: Optional[str] = None
+    save_report: bool = True
+    ollama_url: Optional[str] = None
+    recursive: bool = False
+    skip_existing: bool = True
+    interval: int = 300  # seconds between scans (default 5 min)
+
+    model_config = ConfigDict(extra='allow')
+
+
+def _public_scheduled(task: dict) -> dict:
+    """Serialize a scheduled task for the API."""
+    return {
+        'id': task['id'],
+        'directory': task['directory'],
+        'status': task['status'],
+        'created': task['created'],
+        'interval': task['interval'],
+        'last_run': task.get('last_run'),
+        'next_run': task.get('next_run'),
+        'total_analyzed': task.get('total_analyzed', 0),
+        'last_batch_id': task.get('last_batch_id'),
+        'params': {k: v for k, v in task.items() if k in (
+            'model', 'summary_model', 'prompt', 'frame_interval', 'max_frames',
+            'min_frames', 'concurrency', 'language', 'include_audio',
+            'whisper_model', 'save_report', 'ollama_url', 'recursive', 'skip_existing'
+        )},
+    }
+
+
+async def _scheduled_worker(request: Request, task_id: str):
+    """Background worker: periodically scan directory and analyze new videos."""
+    import asyncio as _asyncio
+
+    task = _SCHEDULED_TASKS.get(task_id)
+    if not task:
+        return
+
+    while not task.get('cancel'):
+        # Scan for un-analyzed videos
+        try:
+            videos = _scan_videos(task['directory'], task.get('recursive', False))
+            pending = []
+            for p in videos:
+                base, _ = os.path.splitext(p)
+                if task.get('skip_existing', True) and os.path.exists(f'{base}.analysis.md'):
+                    continue
+                pending.append(p)
+
+            if pending:
+                log.info(f'Scheduled task {task_id}: found {len(pending)} new videos to analyze')
+
+                # Run batch analysis for the new videos
+                items = []
+                for p in pending:
+                    items.append({
+                        'path': p,
+                        'name': os.path.basename(p),
+                        'status': 'pending',
+                        'report_path': None,
+                        'summary': None,
+                        'sampled_frames': None,
+                        'elapsed': None,
+                        'error': None,
+                        'started': None,
+                        'finished': None,
+                    })
+
+                batch_id = f'sched_{task_id}_{int(time.time())}'
+                batch_job = {
+                    'id': batch_id,
+                    'directory': task['directory'],
+                    'status': 'running',
+                    'created': time.time(),
+                    'finished': None,
+                    'cancel': False,
+                    'paused': False,
+                    'total': len(items),
+                    'completed': 0,
+                    'current': None,
+                    'items': items,
+                    'params': {
+                        'model': task['model'],
+                        'summary_model': task.get('summary_model'),
+                        'prompt': task.get('prompt'),
+                        'frame_interval': task.get('frame_interval', DEFAULT_FRAME_INTERVAL),
+                        'max_frames': task.get('max_frames', DEFAULT_MAX_FRAMES),
+                        'min_frames': task.get('min_frames', DEFAULT_MIN_FRAMES),
+                        'concurrency': task.get('concurrency', DEFAULT_CONCURRENCY),
+                        'language': task.get('language', 'zh'),
+                        'include_audio': task.get('include_audio', False),
+                        'whisper_model': task.get('whisper_model'),
+                        'save_report': task.get('save_report', True),
+                        'ollama_url': task.get('ollama_url'),
+                        'recursive': task.get('recursive', False),
+                        'skip_existing': task.get('skip_existing', True),
+                    },
+                }
+                _BATCH_JOBS[batch_id] = batch_job
+                _prune_jobs()
+
+                task['last_batch_id'] = batch_id
+                task['status'] = 'running'
+                await _run_batch(request, batch_id)
+
+                # Count completed
+                done_count = sum(1 for it in batch_job['items'] if it['status'] == 'done')
+                task['total_analyzed'] = task.get('total_analyzed', 0) + done_count
+                task['status'] = 'active'
+            else:
+                log.debug(f'Scheduled task {task_id}: no new videos found')
+        except Exception as exc:
+            log.exception(exc)
+            task['status'] = 'error'
+            task['last_error'] = str(exc)
+
+        task['last_run'] = time.time()
+        task['next_run'] = task['last_run'] + task['interval']
+
+        # Wait for the interval (check cancel every second for responsiveness)
+        wait_remaining = task['interval']
+        while wait_remaining > 0 and not task.get('cancel'):
+            await _asyncio.sleep(min(1, wait_remaining))
+            wait_remaining -= 1
+
+    task['status'] = 'cancelled'
+
+
+@router.post('/schedule')
+async def create_schedule(
+    request: Request,
+    form_data: ScheduleForm,
+    user=Depends(get_verified_user),
+) -> dict:
+    """Create an automated directory watch task that periodically analyzes new videos."""
+    if not request.app.state.config.ENABLE_OLLAMA_API:
+        raise HTTPException(status_code=503, detail=ERROR_MESSAGES.OLLAMA_API_DISABLED)
+
+    directory = os.path.expanduser(form_data.directory)
+    if not os.path.isdir(directory):
+        raise HTTPException(status_code=404, detail=f'Directory not found: {directory}')
+
+    if len(_SCHEDULED_TASKS) >= _SCHEDULED_MAX:
+        raise HTTPException(status_code=429, detail=f'Maximum {_SCHEDULED_MAX} scheduled tasks allowed')
+
+    task_id = uuid.uuid4().hex[:12]
+    now = time.time()
+    task = {
+        'id': task_id,
+        'directory': directory,
+        'status': 'active',
+        'created': now,
+        'interval': max(60, form_data.interval),  # minimum 1 minute
+        'last_run': None,
+        'next_run': now,  # run immediately on creation
+        'total_analyzed': 0,
+        'last_batch_id': None,
+        'cancel': False,
+        # analysis params
+        'model': form_data.model,
+        'summary_model': form_data.summary_model,
+        'prompt': form_data.prompt,
+        'frame_interval': form_data.frame_interval,
+        'max_frames': form_data.max_frames,
+        'min_frames': form_data.min_frames,
+        'concurrency': form_data.concurrency,
+        'language': form_data.language,
+        'include_audio': form_data.include_audio,
+        'whisper_model': form_data.whisper_model,
+        'save_report': form_data.save_report,
+        'ollama_url': form_data.ollama_url,
+        'recursive': form_data.recursive,
+        'skip_existing': form_data.skip_existing,
+    }
+    _SCHEDULED_TASKS[task_id] = task
+
+    asyncio.create_task(_scheduled_worker(request, task_id))
+
+    return _public_scheduled(task)
+
+
+@router.get('/schedule')
+async def list_schedules(user=Depends(get_verified_user)) -> dict:
+    """List all scheduled directory watch tasks."""
+    tasks = []
+    for task in sorted(_SCHEDULED_TASKS.values(), key=lambda t: t['created'], reverse=True):
+        tasks.append(_public_scheduled(task))
+    return {'tasks': tasks}
+
+
+@router.get('/schedule/{task_id}')
+async def get_schedule(task_id: str, user=Depends(get_verified_user)) -> dict:
+    """Get details of a specific scheduled task."""
+    task = _SCHEDULED_TASKS.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail='Scheduled task not found')
+    return _public_scheduled(task)
+
+
+@router.delete('/schedule/{task_id}')
+async def delete_schedule(task_id: str, user=Depends(get_verified_user)) -> dict:
+    """Cancel and remove a scheduled task."""
+    task = _SCHEDULED_TASKS.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail='Scheduled task not found')
+    task['cancel'] = True
+    task['status'] = 'cancelled'
+    # Remove from registry after a short delay (let worker exit)
+    _SCHEDULED_TASKS.pop(task_id, None)
+    return {'id': task_id, 'status': 'cancelled'}
+
+
+@router.post('/schedule/{task_id}/trigger')
+async def trigger_schedule(task_id: str, request: Request, user=Depends(get_verified_user)) -> dict:
+    """Manually trigger an immediate scan for a scheduled task."""
+    task = _SCHEDULED_TASKS.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail='Scheduled task not found')
+    # Reset next_run to now so the worker picks it up immediately
+    task['next_run'] = time.time()
+    return {'id': task_id, 'status': task['status'], 'next_run': task['next_run']}
+
+
 # --------------------------------------------------------------------------- #
 # History: persistent, cross-session record of finished analyses.
 # --------------------------------------------------------------------------- #

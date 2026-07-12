@@ -3,7 +3,7 @@
 	import { toast } from 'svelte-sonner';
 	import { WEBUI_NAME, showSidebar, mobile } from '$lib/stores';
 	import Spinner from '$lib/components/common/Spinner.svelte';
-	import Tooltip from '$lib/components/icons/Tooltip.svelte';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import SidebarIcon from '$lib/components/icons/Sidebar.svelte';
 	import VideoTabNav from '$lib/components/video/VideoTabNav.svelte';
 	import { goto } from '$app/navigation';

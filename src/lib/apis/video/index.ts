@@ -239,6 +239,81 @@ export const resumeVideoBatch = async (token: string, jobId: string) =>
 export const retryVideoBatch = async (token: string, jobId: string, videoPath?: string) =>
 	_post(token, `/batch/${jobId}/retry`, videoPath ? { video_path: videoPath } : {});
 
+
+// --------------------------------------------------------------------------- //
+// Scheduled / automated directory analysis tasks
+// --------------------------------------------------------------------------- //
+export type ScheduleForm = {
+	directory: string;
+	model: string;
+	summary_model?: string;
+	prompt?: string;
+	frame_interval?: number;
+	max_frames?: number;
+	min_frames?: number;
+	concurrency?: number;
+	language?: string;
+	include_audio?: boolean;
+	whisper_model?: string;
+	save_report?: boolean;
+	ollama_url?: string;
+	recursive?: boolean;
+	skip_existing?: boolean;
+	interval?: number; // seconds between scans
+};
+
+export type ScheduledTask = {
+	id: string;
+	directory: string;
+	status: string;
+	created: number;
+	interval: number;
+	last_run: number | null;
+	next_run: number | null;
+	total_analyzed: number;
+	last_batch_id: string | null;
+	params: Record<string, any>;
+};
+
+/** Create an automated directory watch task. */
+export const createSchedule = async (token: string, payload: ScheduleForm): Promise<ScheduledTask> =>
+	_post(token, '/schedule', payload);
+
+/** List all scheduled tasks. */
+export const listSchedules = async (token: string): Promise<{ tasks: ScheduledTask[] }> =>
+	_get(token, '/schedule');
+
+/** Get details of a specific scheduled task. */
+export const getSchedule = async (token: string, taskId: string): Promise<ScheduledTask> =>
+	_get(token, `/schedule/${taskId}`);
+
+/** Cancel and remove a scheduled task. */
+export const deleteSchedule = async (token: string, taskId: string) => {
+	let error = null;
+	const res = await fetch(`${VIDEO_API_BASE_URL}/schedule/${taskId}`, {
+		method: 'DELETE',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail ?? err;
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
+/** Manually trigger an immediate scan for a scheduled task. */
+export const triggerSchedule = async (token: string, taskId: string): Promise<any> =>
+	_post(token, `/schedule/${taskId}/trigger`, {});
+
 // --------------------------------------------------------------------------- //
 // History
 // --------------------------------------------------------------------------- //
