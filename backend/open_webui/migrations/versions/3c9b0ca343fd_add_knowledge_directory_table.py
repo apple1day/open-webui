@@ -27,11 +27,11 @@ def upgrade() -> None:
         # Create knowledge_directory table
         op.create_table(
             'knowledge_directory',
-            sa.Column('id', sa.Text(), nullable=False),
-            sa.Column('knowledge_id', sa.Text(), nullable=False),
-            sa.Column('parent_id', sa.Text(), nullable=True),
-            sa.Column('name', sa.Text(), nullable=False),
-            sa.Column('user_id', sa.Text(), nullable=False),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('knowledge_id', sa.String(255), nullable=False),
+            sa.Column('parent_id', sa.String(255), nullable=True),
+            sa.Column('name', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=False),
             sa.Column('created_at', sa.BigInteger(), nullable=False),
             sa.Column('updated_at', sa.BigInteger(), nullable=False),
             sa.ForeignKeyConstraint(['knowledge_id'], ['knowledge.id'], ondelete='CASCADE'),
@@ -48,7 +48,7 @@ def upgrade() -> None:
     kf_cols = {c['name'] for c in inspector.get_columns('knowledge_file')}
     if 'directory_id' not in kf_cols:
         with op.batch_alter_table('knowledge_file') as batch:
-            batch.add_column(sa.Column('directory_id', sa.Text(), nullable=True))
+            batch.add_column(sa.Column('directory_id', sa.String(255), nullable=True))
             batch.create_foreign_key(
                 'fk_knowledge_file_directory_id',
                 'knowledge_directory',

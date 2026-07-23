@@ -34,16 +34,16 @@ def upgrade() -> None:
     op.create_table(
         'knowledge_file',
         sa.Column('id', sa.String(255), primary_key=True),
-        sa.Column('user_id', sa.Text(), nullable=False),
+        sa.Column('user_id', sa.String(255), nullable=False),
         sa.Column(
             'knowledge_id',
-            sa.Text(),
+            sa.String(255),
             sa.ForeignKey('knowledge.id', ondelete='CASCADE'),
             nullable=False,
         ),
         sa.Column(
             'file_id',
-            sa.Text(),
+            sa.String(255),
             sa.ForeignKey('file.id', ondelete='CASCADE'),
             nullable=False,
         ),
@@ -65,8 +65,8 @@ def upgrade() -> None:
     knowledge_table = sa.Table(
         'knowledge',
         sa.MetaData(),
-        sa.Column('id', sa.Text()),
-        sa.Column('user_id', sa.Text()),
+        sa.Column('id', sa.String(255)),
+        sa.Column('user_id', sa.String(255)),
         sa.Column('data', sa.JSON()),  # JSON stored as text in SQLite + PG
     )
 
@@ -78,10 +78,10 @@ def upgrade() -> None:
     kf_table = sa.Table(
         'knowledge_file',
         sa.MetaData(),
-        sa.Column('id', sa.Text()),
-        sa.Column('user_id', sa.Text()),
-        sa.Column('knowledge_id', sa.Text()),
-        sa.Column('file_id', sa.Text()),
+        sa.Column('id', sa.String(255)),
+        sa.Column('user_id', sa.String(255)),
+        sa.Column('knowledge_id', sa.String(255)),
+        sa.Column('file_id', sa.String(255)),
         sa.Column('created_at', sa.BigInteger()),
         sa.Column('updated_at', sa.BigInteger()),
     )
@@ -89,7 +89,7 @@ def upgrade() -> None:
     file_table = sa.Table(
         'file',
         sa.MetaData(),
-        sa.Column('id', sa.Text()),
+        sa.Column('id', sa.String(255)),
     )
 
     now = int(time.time())
@@ -138,16 +138,16 @@ def downgrade() -> None:
     knowledge_table = sa.Table(
         'knowledge',
         sa.MetaData(),
-        sa.Column('id', sa.Text()),
+        sa.Column('id', sa.String(255)),
         sa.Column('data', sa.JSON()),
     )
 
     kf_table = sa.Table(
         'knowledge_file',
         sa.MetaData(),
-        sa.Column('id', sa.Text()),
-        sa.Column('knowledge_id', sa.Text()),
-        sa.Column('file_id', sa.Text()),
+        sa.Column('id', sa.String(255)),
+        sa.Column('knowledge_id', sa.String(255)),
+        sa.Column('file_id', sa.String(255)),
     )
 
     results = connection.execute(sa.select(knowledge_table.c.id)).fetchall()

@@ -29,11 +29,11 @@ def upgrade() -> None:
             sa.Column('id', sa.String(255), primary_key=True, nullable=False, unique=True),
             sa.Column(
                 'user_id',
-                sa.Text(),
+                sa.String(255),
                 sa.ForeignKey('user.id', ondelete='CASCADE'),
                 nullable=False,
             ),
-            sa.Column('provider', sa.Text(), nullable=False),
+            sa.Column('provider', sa.String(255), nullable=False),
             sa.Column('token', sa.Text(), nullable=False),
             sa.Column('expires_at', sa.BigInteger(), nullable=False),
             sa.Column('created_at', sa.BigInteger(), nullable=False),

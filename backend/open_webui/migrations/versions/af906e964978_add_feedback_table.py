@@ -26,9 +26,9 @@ def upgrade():
         op.create_table(
             'feedback',
             sa.Column('id', sa.String(255), primary_key=True),  # Unique identifier for each feedback (TEXT type)
-            sa.Column('user_id', sa.Text(), nullable=True),  # ID of the user providing the feedback (TEXT type)
+            sa.Column('user_id', sa.String(255), nullable=True),  # ID of the user providing the feedback (TEXT type)
             sa.Column('version', sa.BigInteger(), default=0),  # Version of feedback (BIGINT type)
-            sa.Column('type', sa.Text(), nullable=True),  # Type of feedback (TEXT type)
+            sa.Column('type', sa.String(255), nullable=True),  # Type of feedback (TEXT type)
             sa.Column('data', sa.JSON(), nullable=True),  # Feedback data (JSON type)
             sa.Column('meta', sa.JSON(), nullable=True),  # Metadata for feedback (JSON type)
             sa.Column('snapshot', sa.JSON(), nullable=True),  # snapshot data for feedback (JSON type)

@@ -24,8 +24,8 @@ def upgrade():
         op.create_table(
             'channel',
             sa.Column('id', sa.String(255), nullable=False, primary_key=True, unique=True),
-            sa.Column('user_id', sa.Text()),
-            sa.Column('name', sa.Text()),
+            sa.Column('user_id', sa.String(255)),
+            sa.Column('name', sa.String(255)),
             sa.Column('description', sa.Text(), nullable=True),
             sa.Column('data', sa.JSON(), nullable=True),
             sa.Column('meta', sa.JSON(), nullable=True),
@@ -38,8 +38,8 @@ def upgrade():
         op.create_table(
             'message',
             sa.Column('id', sa.String(255), nullable=False, primary_key=True, unique=True),
-            sa.Column('user_id', sa.Text()),
-            sa.Column('channel_id', sa.Text(), nullable=True),
+            sa.Column('user_id', sa.String(255)),
+            sa.Column('channel_id', sa.String(255), nullable=True),
             sa.Column('content', sa.Text()),
             sa.Column('data', sa.JSON(), nullable=True),
             sa.Column('meta', sa.JSON(), nullable=True),

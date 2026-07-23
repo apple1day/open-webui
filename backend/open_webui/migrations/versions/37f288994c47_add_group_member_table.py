@@ -35,13 +35,13 @@ def upgrade() -> None:
         sa.Column('id', sa.String(255), primary_key=True, unique=True, nullable=False),
         sa.Column(
             'group_id',
-            sa.Text(),
+            sa.String(255),
             sa.ForeignKey('group.id', ondelete='CASCADE'),
             nullable=False,
         ),
         sa.Column(
             'user_id',
-            sa.Text(),
+            sa.String(255),
             sa.ForeignKey('user.id', ondelete='CASCADE'),
             nullable=False,
         ),
@@ -56,7 +56,7 @@ def upgrade() -> None:
     group_table = sa.Table(
         'group',
         sa.MetaData(),
-        sa.Column('id', sa.Text()),
+        sa.Column('id', sa.String(255)),
         sa.Column('user_ids', sa.JSON()),  # JSON stored as text in SQLite + PG
     )
 
@@ -68,9 +68,9 @@ def upgrade() -> None:
     gm_table = sa.Table(
         'group_member',
         sa.MetaData(),
-        sa.Column('id', sa.Text()),
-        sa.Column('group_id', sa.Text()),
-        sa.Column('user_id', sa.Text()),
+        sa.Column('id', sa.String(255)),
+        sa.Column('group_id', sa.String(255)),
+        sa.Column('user_id', sa.String(255)),
         sa.Column('created_at', sa.BigInteger()),
         sa.Column('updated_at', sa.BigInteger()),
     )
@@ -117,8 +117,8 @@ def downgrade():
     gm_table = sa.Table(
         'group_member',
         sa.MetaData(),
-        sa.Column('group_id', sa.Text()),
-        sa.Column('user_id', sa.Text()),
+        sa.Column('group_id', sa.String(255)),
+        sa.Column('user_id', sa.String(255)),
         sa.Column('created_at', sa.BigInteger()),
         sa.Column('updated_at', sa.BigInteger()),
     )
@@ -126,7 +126,7 @@ def downgrade():
     group_table = sa.Table(
         'group',
         sa.MetaData(),
-        sa.Column('id', sa.Text()),
+        sa.Column('id', sa.String(255)),
         sa.Column('user_ids', sa.JSON()),
     )
 

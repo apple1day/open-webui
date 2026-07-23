@@ -171,7 +171,7 @@ def upgrade() -> None:
         op.create_table(
             'api_key',
             sa.Column('id', sa.String(255), primary_key=True, unique=True),
-            sa.Column('user_id', sa.Text(), sa.ForeignKey('user.id', ondelete='CASCADE')),
+            sa.Column('user_id', sa.String(255), sa.ForeignKey('user.id', ondelete='CASCADE')),
             sa.Column('key', sa.String(255), unique=True, nullable=False),
             sa.Column('data', sa.JSON(), nullable=True),
             sa.Column('expires_at', sa.BigInteger(), nullable=True),
@@ -221,7 +221,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.add_column('user', sa.Column('oauth_sub', sa.Text(), nullable=True))
+    op.add_column('user', sa.Column('oauth_sub', sa.String(255), nullable=True))
 
     conn = op.get_bind()
     rows = conn.execute(sa.select(_user.c.id, _user.c.oauth).where(_user.c.oauth.is_not(None))).fetchall()

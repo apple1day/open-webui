@@ -39,8 +39,8 @@ def upgrade() -> None:
         if 'command' in prompt_cols and 'version_id' not in prompt_cols:
             old_prompt_table = sa.table(
                 'prompt',
-                sa.column('command', sa.Text()),
-                sa.column('user_id', sa.Text()),
+                sa.Column('command', sa.String(255)),
+                sa.Column('user_id', sa.String(255)),
                 sa.column('title', sa.Text()),
                 sa.column('content', sa.Text()),
                 sa.column('timestamp', sa.BigInteger()),
@@ -67,13 +67,13 @@ def upgrade() -> None:
             sa.Column('id', sa.String(255), primary_key=True),
             sa.Column('command', sa.String(255), unique=True, index=True),
             sa.Column('user_id', sa.String(255), nullable=False),
-            sa.Column('name', sa.Text(), nullable=False),
+            sa.Column('name', sa.String(255), nullable=False),
             sa.Column('content', sa.Text(), nullable=False),
             sa.Column('data', sa.JSON(), nullable=True),
             sa.Column('meta', sa.JSON(), nullable=True),
             sa.Column('access_control', sa.JSON(), nullable=True),
             sa.Column('is_active', sa.Boolean(), nullable=False, server_default='1'),
-            sa.Column('version_id', sa.Text(), nullable=True),
+            sa.Column('version_id', sa.String(255), nullable=True),
             sa.Column('tags', sa.JSON(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=False),
             sa.Column('updated_at', sa.BigInteger(), nullable=False),
@@ -84,10 +84,10 @@ def upgrade() -> None:
         op.create_table(
             'prompt_history',
             sa.Column('id', sa.String(255), primary_key=True),
-            sa.Column('prompt_id', sa.Text(), nullable=False, index=True),
-            sa.Column('parent_id', sa.Text(), nullable=True),
+            sa.Column('prompt_id', sa.String(255), nullable=False, index=True),
+            sa.Column('parent_id', sa.String(255), nullable=True),
             sa.Column('snapshot', sa.JSON(), nullable=False),
-            sa.Column('user_id', sa.Text(), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=False),
             sa.Column('commit_message', sa.Text(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=False),
         )
@@ -96,16 +96,16 @@ def upgrade() -> None:
     if existing_prompts:
         prompt_new_table = sa.table(
             'prompt_new',
-            sa.column('id', sa.Text()),
+            sa.Column('id', sa.String(255)),
             sa.column('command', sa.String(255)),
             sa.column('user_id', sa.String(255)),
-            sa.column('name', sa.Text()),
+            sa.Column('name', sa.String(255)),
             sa.column('content', sa.Text()),
             sa.column('data', sa.JSON()),
             sa.column('meta', sa.JSON()),
             sa.column('access_control', sa.JSON()),
             sa.column('is_active', sa.Boolean()),
-            sa.column('version_id', sa.Text()),
+            sa.Column('version_id', sa.String(255)),
             sa.column('tags', sa.JSON()),
             sa.column('created_at', sa.BigInteger()),
             sa.column('updated_at', sa.BigInteger()),
@@ -113,11 +113,11 @@ def upgrade() -> None:
 
         prompt_history_table = sa.table(
             'prompt_history',
-            sa.column('id', sa.Text()),
-            sa.column('prompt_id', sa.Text()),
-            sa.column('parent_id', sa.Text()),
+            sa.Column('id', sa.String(255)),
+            sa.Column('prompt_id', sa.String(255)),
+            sa.Column('parent_id', sa.String(255)),
             sa.column('snapshot', sa.JSON()),
-            sa.column('user_id', sa.Text()),
+            sa.Column('user_id', sa.String(255)),
             sa.column('commit_message', sa.Text()),
             sa.column('created_at', sa.BigInteger()),
         )
@@ -190,9 +190,9 @@ def downgrade() -> None:
     prompt_table = sa.table(
         'prompt',
         sa.column('command', sa.String(255)),
-        sa.column('name', sa.Text()),
+        sa.Column('name', sa.String(255)),
         sa.column('created_at', sa.BigInteger()),
-        sa.column('user_id', sa.Text()),
+        sa.Column('user_id', sa.String(255)),
         sa.column('content', sa.Text()),
         sa.column('access_control', sa.JSON()),
     )

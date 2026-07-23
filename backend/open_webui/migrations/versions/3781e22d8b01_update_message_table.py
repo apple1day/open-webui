@@ -27,7 +27,7 @@ def upgrade():
             'channel',
             sa.Column(
                 'type',
-                sa.Text(),
+                sa.String(255),
                 nullable=True,
             ),
         )
@@ -37,16 +37,16 @@ def upgrade():
     if 'parent_id' not in message_cols:
         op.add_column(
             'message',
-            sa.Column('parent_id', sa.Text(), nullable=True),
+            sa.Column('parent_id', sa.String(255), nullable=True),
         )
 
     if 'message_reaction' not in existing_tables:
         op.create_table(
             'message_reaction',
             sa.Column('id', sa.String(255), nullable=False, primary_key=True, unique=True),  # Unique reaction ID
-            sa.Column('user_id', sa.Text(), nullable=False),  # User who reacted
-            sa.Column('message_id', sa.Text(), nullable=False),  # Message that was reacted to
-            sa.Column('name', sa.Text(), nullable=False),  # Reaction name (e.g. "thumbs_up")
+            sa.Column('user_id', sa.String(255), nullable=False),  # User who reacted
+            sa.Column('message_id', sa.String(255), nullable=False),  # Message that was reacted to
+            sa.Column('name', sa.String(255), nullable=False),  # Reaction name (e.g. "thumbs_up")
             sa.Column('created_at', sa.BigInteger(), nullable=True),  # Timestamp of when the reaction was added
         )
 
@@ -56,8 +56,8 @@ def upgrade():
             sa.Column(
                 'id', sa.String(255), nullable=False, primary_key=True, unique=True
             ),  # Record ID for the membership row
-            sa.Column('channel_id', sa.Text(), nullable=False),  # Associated channel
-            sa.Column('user_id', sa.Text(), nullable=False),  # Associated user
+            sa.Column('channel_id', sa.String(255), nullable=False),  # Associated channel
+            sa.Column('user_id', sa.String(255), nullable=False),  # Associated user
             sa.Column('created_at', sa.BigInteger(), nullable=True),  # Timestamp of when the user joined the channel
         )
 

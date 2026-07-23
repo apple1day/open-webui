@@ -28,7 +28,7 @@ def upgrade() -> None:
     if 'bio' not in user_cols:
         op.add_column('user', sa.Column('bio', sa.Text(), nullable=True))
     if 'gender' not in user_cols:
-        op.add_column('user', sa.Column('gender', sa.Text(), nullable=True))
+        op.add_column('user', sa.Column('gender', sa.String(255), nullable=True))
     if 'date_of_birth' not in user_cols:
         op.add_column('user', sa.Column('date_of_birth', sa.Date(), nullable=True))
 

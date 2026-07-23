@@ -97,7 +97,7 @@ def upgrade():
     if 'pinned' not in chat_columns:
         op.add_column('chat', sa.Column('pinned', sa.Boolean(), nullable=True))
     if 'meta' not in chat_columns:
-        op.add_column('chat', sa.Column('meta', sa.JSON(), nullable=False, server_default='{}'))
+        op.add_column('chat', sa.Column('meta', sa.JSON(), nullable=True))
 
     chatidtag = table('chatidtag', column('chat_id', sa.String(255)), column('tag_name', sa.String(255)))
     chat = table(

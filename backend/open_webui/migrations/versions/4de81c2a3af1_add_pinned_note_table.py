@@ -34,9 +34,9 @@ def upgrade() -> None:
     if 'pinned_note' not in existing_tables:
         op.create_table(
             'pinned_note',
-            sa.Column('id', sa.Text(), nullable=False),
-            sa.Column('user_id', sa.Text(), nullable=False),
-            sa.Column('note_id', sa.Text(), sa.ForeignKey('note.id', ondelete='CASCADE'), nullable=False),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=False),
+            sa.Column('note_id', sa.String(255), sa.ForeignKey('note.id', ondelete='CASCADE'), nullable=False),
             sa.Column('created_at', sa.BigInteger(), nullable=False),
             sa.PrimaryKeyConstraint('id'),
             sa.UniqueConstraint('user_id', 'note_id', name='uq_pinned_note'),

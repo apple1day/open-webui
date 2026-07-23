@@ -39,6 +39,10 @@ def upgrade():
             if pk_name:
                 print(f'Dropping primary key constraint: {pk_name}')
                 batch_op.drop_constraint(pk_name, type_='primary')
+            else:
+                # MySQL reports the PK constraint name as None; drop via 'PRIMARY'.
+                print('Dropping primary key constraint: PRIMARY')
+                batch_op.drop_constraint('PRIMARY', type_='primary')
 
         # Now create the new primary key with the combination of 'id' and 'user_id'
         print("Creating new primary key with 'id' and 'user_id'.")

@@ -69,8 +69,8 @@ def upgrade():
         op.create_table(
             'shared_chat',
             sa.Column('id', sa.String(255), primary_key=True),
-            sa.Column('chat_id', sa.Text(), sa.ForeignKey('chat.id', ondelete='CASCADE'), nullable=False),
-            sa.Column('user_id', sa.Text(), nullable=False),
+            sa.Column('chat_id', sa.String(255), sa.ForeignKey('chat.id', ondelete='CASCADE'), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=False),
             sa.Column('title', sa.Text(), nullable=True),
             sa.Column('chat', sa.JSON(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=True),

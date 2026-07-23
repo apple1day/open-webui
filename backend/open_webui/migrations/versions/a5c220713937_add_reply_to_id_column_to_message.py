@@ -27,7 +27,7 @@ def upgrade() -> None:
     if 'reply_to_id' not in msg_cols:
         op.add_column(
             'message',
-            sa.Column('reply_to_id', sa.Text(), nullable=True),
+            sa.Column('reply_to_id', sa.String(255), nullable=True),
         )
 
 

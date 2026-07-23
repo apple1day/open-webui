@@ -33,11 +33,11 @@ def upgrade() -> None:
         op.create_table(
             'access_grant',
             sa.Column('id', sa.String(255), nullable=False, primary_key=True),
-            sa.Column('resource_type', sa.Text(), nullable=False),
-            sa.Column('resource_id', sa.Text(), nullable=False),
-            sa.Column('principal_type', sa.Text(), nullable=False),
-            sa.Column('principal_id', sa.Text(), nullable=False),
-            sa.Column('permission', sa.Text(), nullable=False),
+            sa.Column('resource_type', sa.String(64), nullable=False),
+            sa.Column('resource_id', sa.String(255), nullable=False),
+            sa.Column('principal_type', sa.String(64), nullable=False),
+            sa.Column('principal_id', sa.String(255), nullable=False),
+            sa.Column('permission', sa.String(64), nullable=False),
             sa.Column('created_at', sa.BigInteger(), nullable=False),
             sa.UniqueConstraint(
                 'resource_type',
@@ -89,7 +89,7 @@ def upgrade() -> None:
             continue
 
         # Query all rows
-        result = conn.execute(sa.text(f'SELECT id, access_control FROM "{table_name}"'))
+        result = conn.execute(sa.text(f'SELECT id, access_control FROM {table_name}'))
         rows = result.fetchall()
 
         for row in rows:
@@ -316,7 +316,7 @@ def downgrade() -> None:
 
             try:
                 conn.execute(
-                    sa.text(f'UPDATE "{table_name}" SET access_control = :access_control WHERE id = :id'),
+                    sa.text(f'UPDATE {table_name} SET access_control = :access_control WHERE id = :id'),
                     {'access_control': access_control_value, 'id': resource_id},
                 )
             except Exception:
@@ -329,7 +329,7 @@ def downgrade() -> None:
             try:
                 conn.execute(
                     sa.text(f"""
-                        UPDATE "{table_name}" 
+                        UPDATE {table_name} 
                         SET access_control = :private_value
                         WHERE id NOT IN (
                             SELECT DISTINCT resource_id FROM access_grant WHERE resource_type = :resource_type

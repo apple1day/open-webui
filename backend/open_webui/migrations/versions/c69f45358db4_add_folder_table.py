@@ -23,10 +23,10 @@ def upgrade():
     if 'folder' not in existing_tables:
         op.create_table(
             'folder',
-            sa.Column('id', sa.Text(), nullable=False),
-            sa.Column('parent_id', sa.Text(), nullable=True),
-            sa.Column('user_id', sa.Text(), nullable=False),
-            sa.Column('name', sa.Text(), nullable=False),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('parent_id', sa.String(255), nullable=True),
+            sa.Column('user_id', sa.String(255), nullable=False),
+            sa.Column('name', sa.String(255), nullable=False),
             sa.Column('items', sa.JSON(), nullable=True),
             sa.Column('meta', sa.JSON(), nullable=True),
             sa.Column('is_expanded', sa.Boolean(), default=False, nullable=False),
@@ -45,7 +45,7 @@ def upgrade():
     if 'folder_id' not in chat_cols:
         op.add_column(
             'chat',
-            sa.Column('folder_id', sa.Text(), nullable=True),
+            sa.Column('folder_id', sa.String(255), nullable=True),
         )
 
 

@@ -31,8 +31,8 @@ def upgrade():
         op.create_table(
             'automation',
             sa.Column('id', sa.String(255), primary_key=True),
-            sa.Column('user_id', sa.Text(), nullable=False),
-            sa.Column('name', sa.Text(), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=False),
+            sa.Column('name', sa.String(255), nullable=False),
             sa.Column('data', sa.JSON(), nullable=False),
             sa.Column('meta', sa.JSON(), nullable=True),
             sa.Column('is_active', sa.Boolean(), nullable=False, default=True),
@@ -51,9 +51,9 @@ def upgrade():
         op.create_table(
             'automation_run',
             sa.Column('id', sa.String(255), primary_key=True),
-            sa.Column('automation_id', sa.Text(), nullable=False),
-            sa.Column('chat_id', sa.Text(), nullable=True),
-            sa.Column('status', sa.Text(), nullable=False),
+            sa.Column('automation_id', sa.String(255), nullable=False),
+            sa.Column('chat_id', sa.String(255), nullable=True),
+            sa.Column('status', sa.String(255), nullable=False),
             sa.Column('error', sa.Text(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=False),
         )

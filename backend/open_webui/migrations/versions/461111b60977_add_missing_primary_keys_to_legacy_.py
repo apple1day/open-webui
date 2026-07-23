@@ -63,8 +63,10 @@ def upgrade() -> None:
         conn.execute(sa.text(f'DROP TABLE IF EXISTS _alembic_tmp_{table_name}'))
         with op.batch_alter_table(table_name) as batch_op:
             # Drop existing PK if any (e.g. on wrong column)
-            if pk_cols and pk.get('name'):
-                batch_op.drop_constraint(pk['name'], type_='primary')
+            if pk_cols:
+                # MySQL reports the PK constraint name as None; drop via 'PRIMARY'.
+                _pk_name = pk.get('name') or 'PRIMARY'
+                batch_op.drop_constraint(_pk_name, type_='primary')
 
             batch_op.create_primary_key(f'pk_{table_name}', pk_columns)
 

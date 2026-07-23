@@ -30,7 +30,7 @@ def upgrade() -> None:
             batch_op.add_column(
                 sa.Column(
                     'message_id',
-                    sa.Text(),
+                    sa.String(255),
                     sa.ForeignKey('message.id', ondelete='CASCADE', name='fk_channel_file_message_id'),
                     nullable=True,
                 )
