@@ -24,9 +24,9 @@ def upgrade() -> None:
     if 'skill' not in existing_tables:
         op.create_table(
             'skill',
-            sa.Column('id', sa.String(), nullable=False, primary_key=True),
-            sa.Column('user_id', sa.String(), nullable=False),
-            sa.Column('name', sa.Text(), nullable=False, unique=True),
+            sa.Column('id', sa.String(255), nullable=False, primary_key=True),
+            sa.Column('user_id', sa.String(255), nullable=False),
+            sa.Column('name', sa.String(255), nullable=False, unique=True),
             sa.Column('description', sa.Text(), nullable=True),
             sa.Column('content', sa.Text(), nullable=False),
             sa.Column('meta', sa.JSON(), nullable=True),

@@ -27,7 +27,7 @@ def upgrade() -> None:
     if 'channel_file' not in existing_tables:
         op.create_table(
             'channel_file',
-            sa.Column('id', sa.Text(), primary_key=True),
+            sa.Column('id', sa.String(255), primary_key=True),
             sa.Column('user_id', sa.Text(), nullable=False),
             sa.Column(
                 'channel_id',

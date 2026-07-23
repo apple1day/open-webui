@@ -26,7 +26,7 @@ def upgrade() -> None:
     if 'oauth_session' not in existing_tables:
         op.create_table(
             'oauth_session',
-            sa.Column('id', sa.Text(), primary_key=True, nullable=False, unique=True),
+            sa.Column('id', sa.String(255), primary_key=True, nullable=False, unique=True),
             sa.Column(
                 'user_id',
                 sa.Text(),

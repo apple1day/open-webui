@@ -32,7 +32,7 @@ def upgrade() -> None:
     # 1. Create new table
     op.create_table(
         'group_member',
-        sa.Column('id', sa.Text(), primary_key=True, unique=True, nullable=False),
+        sa.Column('id', sa.String(255), primary_key=True, unique=True, nullable=False),
         sa.Column(
             'group_id',
             sa.Text(),

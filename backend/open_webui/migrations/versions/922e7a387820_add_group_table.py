@@ -23,7 +23,7 @@ def upgrade():
     if 'group' not in existing_tables:
         op.create_table(
             'group',
-            sa.Column('id', sa.Text(), nullable=False, primary_key=True, unique=True),
+            sa.Column('id', sa.String(255), nullable=False, primary_key=True, unique=True),
             sa.Column('user_id', sa.Text(), nullable=True),
             sa.Column('name', sa.Text(), nullable=True),
             sa.Column('description', sa.Text(), nullable=True),

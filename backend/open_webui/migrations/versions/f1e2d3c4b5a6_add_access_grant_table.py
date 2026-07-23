@@ -32,7 +32,7 @@ def upgrade() -> None:
     if 'access_grant' not in existing_tables:
         op.create_table(
             'access_grant',
-            sa.Column('id', sa.Text(), nullable=False, primary_key=True),
+            sa.Column('id', sa.String(255), nullable=False, primary_key=True),
             sa.Column('resource_type', sa.Text(), nullable=False),
             sa.Column('resource_id', sa.Text(), nullable=False),
             sa.Column('principal_type', sa.Text(), nullable=False),

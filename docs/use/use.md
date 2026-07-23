@@ -252,6 +252,7 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 
 ./venv/bin/python scripts/video_tasks.py --config docs/json/even-path.json --ollama-url http://localhost:11434
 
+./venv/bin/python scripts/video_tasks.py --config docs/json/even-path.json --ollama-url http://localhost:11434
 # 
 
 

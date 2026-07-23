@@ -68,7 +68,7 @@ def upgrade():
     if 'shared_chat' not in tables:
         op.create_table(
             'shared_chat',
-            sa.Column('id', sa.Text(), primary_key=True),
+            sa.Column('id', sa.String(255), primary_key=True),
             sa.Column('chat_id', sa.Text(), sa.ForeignKey('chat.id', ondelete='CASCADE'), nullable=False),
             sa.Column('user_id', sa.Text(), nullable=False),
             sa.Column('title', sa.Text(), nullable=True),

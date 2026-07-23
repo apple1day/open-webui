@@ -33,7 +33,7 @@ def upgrade() -> None:
 
     op.create_table(
         'knowledge_file',
-        sa.Column('id', sa.Text(), primary_key=True),
+        sa.Column('id', sa.String(255), primary_key=True),
         sa.Column('user_id', sa.Text(), nullable=False),
         sa.Column(
             'knowledge_id',

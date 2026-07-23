@@ -168,6 +168,13 @@ def _make_async_url(url: str) -> str:
         return url.replace('postgresql://', 'postgresql+psycopg://', 1)
     if url.startswith('postgres://'):
         return url.replace('postgres://', 'postgresql+psycopg://', 1)
+    # MySQL: sync driver is pymysql, async driver is aiomysql.
+    # The sync engine (create_engine) consumes the raw URL, so DATABASE_URL must
+    # stay sync (mysql+pymysql); convert it here for the async engine only.
+    if url.startswith('mysql+pymysql://'):
+        return url.replace('mysql+pymysql://', 'mysql+aiomysql://', 1)
+    if url.startswith('mysql://'):
+        return url.replace('mysql://', 'mysql+aiomysql://', 1)
     # For other dialects, return as-is and let SQLAlchemy handle it
     return url
 

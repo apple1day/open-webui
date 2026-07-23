@@ -1,5 +1,6 @@
 {
     "ollama_url": "http://localhost:11434",
+    "log_file": "logs/video_tasks.log",
     "default_model": "minicpm-v:latest",
     "default_summary_model": "qwen2.5:14b",
     "language": "zh",

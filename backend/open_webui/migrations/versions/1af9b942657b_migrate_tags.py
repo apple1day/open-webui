@@ -55,9 +55,9 @@ def upgrade():
 
     tag = table(
         'tag',
-        column('id', sa.String()),
-        column('name', sa.String()),
-        column('user_id', sa.String()),
+        column('id', sa.String(255)),
+        column('name', sa.String(255)),
+        column('user_id', sa.String(255)),
         column('meta', sa.JSON()),
     )
 
@@ -99,10 +99,10 @@ def upgrade():
     if 'meta' not in chat_columns:
         op.add_column('chat', sa.Column('meta', sa.JSON(), nullable=False, server_default='{}'))
 
-    chatidtag = table('chatidtag', column('chat_id', sa.String()), column('tag_name', sa.String()))
+    chatidtag = table('chatidtag', column('chat_id', sa.String(255)), column('tag_name', sa.String(255)))
     chat = table(
         'chat',
-        column('id', sa.String()),
+        column('id', sa.String(255)),
         column('pinned', sa.Boolean()),
         column('meta', sa.JSON()),
     )

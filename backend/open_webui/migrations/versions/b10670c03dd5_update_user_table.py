@@ -148,9 +148,9 @@ def upgrade() -> None:
     # ── Add new columns (idempotent) ──────────────────────────────────
     for col_name, col_type in [
         ('profile_banner_image_url', sa.Text()),
-        ('timezone', sa.String()),
-        ('presence_state', sa.String()),
-        ('status_emoji', sa.String()),
+        ('timezone', sa.String(255)),
+        ('presence_state', sa.String(255)),
+        ('status_emoji', sa.String(255)),
         ('status_message', sa.Text()),
         ('status_expires_at', sa.BigInteger()),
         ('oauth', sa.JSON()),
@@ -170,9 +170,9 @@ def upgrade() -> None:
     if 'api_key' not in existing_tables:
         op.create_table(
             'api_key',
-            sa.Column('id', sa.Text(), primary_key=True, unique=True),
+            sa.Column('id', sa.String(255), primary_key=True, unique=True),
             sa.Column('user_id', sa.Text(), sa.ForeignKey('user.id', ondelete='CASCADE')),
-            sa.Column('key', sa.Text(), unique=True, nullable=False),
+            sa.Column('key', sa.String(255), unique=True, nullable=False),
             sa.Column('data', sa.JSON(), nullable=True),
             sa.Column('expires_at', sa.BigInteger(), nullable=True),
             sa.Column('last_used_at', sa.BigInteger(), nullable=True),
@@ -240,7 +240,7 @@ def downgrade() -> None:
     op.drop_column('user', 'oauth')
 
     # --- Restore api_key field ---
-    op.add_column('user', sa.Column('api_key', sa.String(), nullable=True))
+    op.add_column('user', sa.Column('api_key', sa.String(255), nullable=True))
 
     keys = conn.execute(sa.select(_api_key.c.user_id, _api_key.c.key)).fetchall()
     for uid, key in keys:

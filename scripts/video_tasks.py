@@ -403,9 +403,67 @@ def extract_frames_from_segment(path: str, start_time: float, end_time: float,
 _FRAME_FILES = {}  # type: dict[float, tuple[str, str]]
 
 
+# --------------------------------------------------------------------------- #
+# 0) 日志文件：把 _c() 的输出同步写入日志文件（便于事后核查每帧运行结果）
+# --------------------------------------------------------------------------- #
+_LOG_FILE = None          # 全局日志文件句柄（None=仅打印到终端）
+_LOG_FILE_PATH = None
+
+def set_log_file(path: Optional[str]) -> None:
+    """打开日志文件（追加模式）。失败不影响终端输出。"""
+    global _LOG_FILE, _LOG_FILE_PATH
+    if not path:
+        return
+    try:
+        d = os.path.dirname(os.path.abspath(path))
+        os.makedirs(d, exist_ok=True)
+        _LOG_FILE_PATH = path
+        _LOG_FILE = open(path, 'a', encoding='utf-8')
+    except Exception as exc:
+        _LOG_FILE = None
+        print(f'[WARN] 无法打开日志文件 {path}：{exc}', file=sys.stderr)
+
+def close_log_file() -> None:
+    global _LOG_FILE
+    if _LOG_FILE is not None:
+        try:
+            _LOG_FILE.flush()
+            _LOG_FILE.close()
+        except Exception:
+            pass
+        _LOG_FILE = None
+
+def _log_to_file(tag: str, msg: str) -> None:
+    """把一行日志（带时间戳、去色）写入日志文件。"""
+    if _LOG_FILE is None:
+        return
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        _LOG_FILE.write(f'[{ts}] [{tag}] {msg}\n')
+        _LOG_FILE.flush()
+    except Exception:
+        pass
+
+def _log_frame_detail(video_path: str, idx: int, ts: float, desc: str) -> None:
+    """把单帧的识别结果以结构化块的形式写入日志文件（按帧汇总便于核查）。"""
+    if _LOG_FILE is None:
+        return
+    ts_hms = time.strftime('%H:%M:%S', time.gmtime(ts))
+    try:
+        _LOG_FILE.write('\n' + '=' * 64 + '\n')
+        _LOG_FILE.write(f'[帧结果] 视频={os.path.basename(video_path)} '
+                        f'帧序={idx + 1} 时间={ts_hms} ({ts:.1f}s)\n')
+        _LOG_FILE.write('-' * 64 + '\n')
+        _LOG_FILE.write((desc or '') + '\n')
+        _LOG_FILE.flush()
+    except Exception:
+        pass
+
+
 def _c(tag: str, msg: str) -> None:
     colors = {'INFO': '34', 'OK': '32', 'WARN': '33', 'ERR': '31'}
     print(f'\033[1;{colors.get(tag, "0")}m[{tag:>4}]\033[0m {msg}', flush=True)
+    _log_to_file(tag, msg)
 
 
 # --------------------------------------------------------------------------- #
@@ -2082,6 +2140,11 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
                 _c('WARN', f'  帧 {i + 1} 识别失败：{exc}')
             frame_results.append((i, ts, desc))
 
+    # 3.4) 把每一帧的识别结果写入日志文件（按帧汇总，便于事后核查每个视频帧的运行结果）
+    for idx, ts, desc in frame_results:
+        _log_frame_detail(video_path, idx, ts, desc)
+    _log_to_file('OK', f'逐帧识别完成：共 {len(frame_results)} 帧结果已写入日志')
+
     # 3.5) 可选：音频转写（faster-whisper）
     transcript, segments, srt_path = '', [], None
     if include_audio:
@@ -2388,6 +2451,9 @@ def main() -> int:
                         help='配合 --video-dir：递归扫描子目录')
     parser.add_argument('--skip-existing', action='store_true',
                         help='跳过已生成同名 .analysis.md 报告的视频（增量分析）')
+    parser.add_argument('--log-file', default=None,
+                        help='运行日志写入的文件路径（默认 logs/video_tasks.log）；'
+                             '可指向 logs/backend.log 等同目录文件')
     parser.add_argument('--watch', action='store_true',
                         help='守护模式：持续监控 --video-dir，发现新视频自动分析（配合 --skip-existing 实现增量）')
     parser.add_argument('--watch-interval', type=int, default=300,
@@ -2412,6 +2478,13 @@ def main() -> int:
         cfg['mlx_summary_model'] = args.mlx_summary_model
     if args.skip_existing:
         cfg['skip_existing'] = True
+
+    # 日志文件：把运行日志（含每帧去重/质量过滤/识别结果）写入 logs/ 下的文件
+    log_file = args.log_file or cfg.get('log_file')
+    if not log_file:
+        log_file = os.path.normpath(os.path.join(here, '..', 'logs', 'video_tasks.log'))
+    set_log_file(log_file)
+    _c('INFO', f'运行日志将写入：{log_file}')
 
     ollama_url = args.ollama_url or cfg.get('ollama_url') or os.getenv('OLLAMA_BASE_URL') or 'http://localhost:11434'
 
@@ -2537,6 +2610,7 @@ def main() -> int:
         except Exception as exc:
             _c('ERR', f'任务异常（{task.get("video_path", "?")}）：{exc}')
     _c('OK', '全部视频任务执行完毕。')
+    close_log_file()
     return 0
 
 

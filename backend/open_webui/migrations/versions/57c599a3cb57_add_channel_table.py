@@ -23,7 +23,7 @@ def upgrade():
     if 'channel' not in existing_tables:
         op.create_table(
             'channel',
-            sa.Column('id', sa.Text(), nullable=False, primary_key=True, unique=True),
+            sa.Column('id', sa.String(255), nullable=False, primary_key=True, unique=True),
             sa.Column('user_id', sa.Text()),
             sa.Column('name', sa.Text()),
             sa.Column('description', sa.Text(), nullable=True),
@@ -37,7 +37,7 @@ def upgrade():
     if 'message' not in existing_tables:
         op.create_table(
             'message',
-            sa.Column('id', sa.Text(), nullable=False, primary_key=True, unique=True),
+            sa.Column('id', sa.String(255), nullable=False, primary_key=True, unique=True),
             sa.Column('user_id', sa.Text()),
             sa.Column('channel_id', sa.Text(), nullable=True),
             sa.Column('content', sa.Text()),

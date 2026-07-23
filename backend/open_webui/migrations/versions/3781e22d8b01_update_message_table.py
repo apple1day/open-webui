@@ -43,7 +43,7 @@ def upgrade():
     if 'message_reaction' not in existing_tables:
         op.create_table(
             'message_reaction',
-            sa.Column('id', sa.Text(), nullable=False, primary_key=True, unique=True),  # Unique reaction ID
+            sa.Column('id', sa.String(255), nullable=False, primary_key=True, unique=True),  # Unique reaction ID
             sa.Column('user_id', sa.Text(), nullable=False),  # User who reacted
             sa.Column('message_id', sa.Text(), nullable=False),  # Message that was reacted to
             sa.Column('name', sa.Text(), nullable=False),  # Reaction name (e.g. "thumbs_up")
@@ -54,7 +54,7 @@ def upgrade():
         op.create_table(
             'channel_member',
             sa.Column(
-                'id', sa.Text(), nullable=False, primary_key=True, unique=True
+                'id', sa.String(255), nullable=False, primary_key=True, unique=True
             ),  # Record ID for the membership row
             sa.Column('channel_id', sa.Text(), nullable=False),  # Associated channel
             sa.Column('user_id', sa.Text(), nullable=False),  # Associated user

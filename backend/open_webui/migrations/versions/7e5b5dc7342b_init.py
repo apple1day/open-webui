@@ -19,8 +19,8 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'auth',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('email', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('email', sa.String(255), nullable=True),
             sa.Column('password', sa.Text(), nullable=True),
             sa.Column('active', sa.Boolean(), nullable=True),
         ],
@@ -29,8 +29,8 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'chat',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('title', sa.Text(), nullable=True),
             sa.Column('chat', sa.Text(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=True),
@@ -43,10 +43,10 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'chatidtag',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('tag_name', sa.String(), nullable=True),
-            sa.Column('chat_id', sa.String(), nullable=True),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('tag_name', sa.String(255), nullable=True),
+            sa.Column('chat_id', sa.String(255), nullable=True),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('timestamp', sa.BigInteger(), nullable=True),
         ],
         [sa.PrimaryKeyConstraint('id')],
@@ -54,12 +54,12 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'document',
         [
-            sa.Column('collection_name', sa.String(), nullable=False),
-            sa.Column('name', sa.String(), nullable=True),
+            sa.Column('collection_name', sa.String(255), nullable=False),
+            sa.Column('name', sa.String(255), nullable=True),
             sa.Column('title', sa.Text(), nullable=True),
             sa.Column('filename', sa.Text(), nullable=True),
             sa.Column('content', sa.Text(), nullable=True),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('timestamp', sa.BigInteger(), nullable=True),
         ],
         [sa.PrimaryKeyConstraint('collection_name'), sa.UniqueConstraint('name')],
@@ -67,8 +67,8 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'file',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('filename', sa.Text(), nullable=True),
             sa.Column('meta', JSONField(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=True),
@@ -78,8 +78,8 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'function',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('name', sa.Text(), nullable=True),
             sa.Column('type', sa.Text(), nullable=True),
             sa.Column('content', sa.Text(), nullable=True),
@@ -95,8 +95,8 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'memory',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('content', sa.Text(), nullable=True),
             sa.Column('updated_at', sa.BigInteger(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=True),
@@ -120,8 +120,8 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'prompt',
         [
-            sa.Column('command', sa.String(), nullable=False),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('command', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('title', sa.Text(), nullable=True),
             sa.Column('content', sa.Text(), nullable=True),
             sa.Column('timestamp', sa.BigInteger(), nullable=True),
@@ -131,9 +131,9 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'tag',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('name', sa.String(), nullable=True),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('name', sa.String(255), nullable=True),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('data', sa.Text(), nullable=True),
         ],
         [sa.PrimaryKeyConstraint('id')],
@@ -141,8 +141,8 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'tool',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('user_id', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.String(255), nullable=True),
             sa.Column('name', sa.Text(), nullable=True),
             sa.Column('content', sa.Text(), nullable=True),
             sa.Column('specs', JSONField(), nullable=True),
@@ -156,15 +156,15 @@ _INITIAL_TABLES: list[tuple[str, list[sa.Column], list]] = [
     (
         'user',
         [
-            sa.Column('id', sa.String(), nullable=False),
-            sa.Column('name', sa.String(), nullable=True),
-            sa.Column('email', sa.String(), nullable=True),
-            sa.Column('role', sa.String(), nullable=True),
+            sa.Column('id', sa.String(255), nullable=False),
+            sa.Column('name', sa.String(255), nullable=True),
+            sa.Column('email', sa.String(255), nullable=True),
+            sa.Column('role', sa.String(255), nullable=True),
             sa.Column('profile_image_url', sa.Text(), nullable=True),
             sa.Column('last_active_at', sa.BigInteger(), nullable=True),
             sa.Column('updated_at', sa.BigInteger(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=True),
-            sa.Column('api_key', sa.String(), nullable=True),
+            sa.Column('api_key', sa.String(255), nullable=True),
             sa.Column('settings', JSONField(), nullable=True),
             sa.Column('info', JSONField(), nullable=True),
             sa.Column('oauth_sub', sa.Text(), nullable=True),

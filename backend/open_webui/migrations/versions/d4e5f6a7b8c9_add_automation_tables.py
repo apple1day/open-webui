@@ -30,7 +30,7 @@ def upgrade():
     if 'automation' not in tables:
         op.create_table(
             'automation',
-            sa.Column('id', sa.Text(), primary_key=True),
+            sa.Column('id', sa.String(255), primary_key=True),
             sa.Column('user_id', sa.Text(), nullable=False),
             sa.Column('name', sa.Text(), nullable=False),
             sa.Column('data', sa.JSON(), nullable=False),
@@ -50,7 +50,7 @@ def upgrade():
     if 'automation_run' not in tables:
         op.create_table(
             'automation_run',
-            sa.Column('id', sa.Text(), primary_key=True),
+            sa.Column('id', sa.String(255), primary_key=True),
             sa.Column('automation_id', sa.Text(), nullable=False),
             sa.Column('chat_id', sa.Text(), nullable=True),
             sa.Column('status', sa.Text(), nullable=False),

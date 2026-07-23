@@ -52,7 +52,7 @@ def upgrade() -> None:
     if 'channel_webhook' not in existing_tables:
         op.create_table(
             'channel_webhook',
-            sa.Column('id', sa.Text(), primary_key=True, unique=True, nullable=False),
+            sa.Column('id', sa.String(255), primary_key=True, unique=True, nullable=False),
             sa.Column('user_id', sa.Text(), nullable=False),
             sa.Column(
                 'channel_id',

@@ -64,9 +64,9 @@ def upgrade() -> None:
     if 'prompt_new' not in existing_tables:
         op.create_table(
             'prompt_new',
-            sa.Column('id', sa.Text(), primary_key=True),
-            sa.Column('command', sa.String(), unique=True, index=True),
-            sa.Column('user_id', sa.String(), nullable=False),
+            sa.Column('id', sa.String(255), primary_key=True),
+            sa.Column('command', sa.String(255), unique=True, index=True),
+            sa.Column('user_id', sa.String(255), nullable=False),
             sa.Column('name', sa.Text(), nullable=False),
             sa.Column('content', sa.Text(), nullable=False),
             sa.Column('data', sa.JSON(), nullable=True),
@@ -83,7 +83,7 @@ def upgrade() -> None:
     if 'prompt_history' not in existing_tables:
         op.create_table(
             'prompt_history',
-            sa.Column('id', sa.Text(), primary_key=True),
+            sa.Column('id', sa.String(255), primary_key=True),
             sa.Column('prompt_id', sa.Text(), nullable=False, index=True),
             sa.Column('parent_id', sa.Text(), nullable=True),
             sa.Column('snapshot', sa.JSON(), nullable=False),
@@ -97,8 +97,8 @@ def upgrade() -> None:
         prompt_new_table = sa.table(
             'prompt_new',
             sa.column('id', sa.Text()),
-            sa.column('command', sa.String()),
-            sa.column('user_id', sa.String()),
+            sa.column('command', sa.String(255)),
+            sa.column('user_id', sa.String(255)),
             sa.column('name', sa.Text()),
             sa.column('content', sa.Text()),
             sa.column('data', sa.JSON()),
@@ -189,7 +189,7 @@ def downgrade() -> None:
     # Step 1: Read new data
     prompt_table = sa.table(
         'prompt',
-        sa.column('command', sa.String()),
+        sa.column('command', sa.String(255)),
         sa.column('name', sa.Text()),
         sa.column('created_at', sa.BigInteger()),
         sa.column('user_id', sa.Text()),
@@ -219,8 +219,8 @@ def downgrade() -> None:
     # Assuming old schema:
     op.create_table(
         'prompt',
-        sa.Column('command', sa.String(), primary_key=True),
-        sa.Column('user_id', sa.String()),
+        sa.Column('command', sa.String(255), primary_key=True),
+        sa.Column('user_id', sa.String(255)),
         sa.Column('title', sa.Text()),
         sa.Column('content', sa.Text()),
         sa.Column('timestamp', sa.BigInteger()),
@@ -231,8 +231,8 @@ def downgrade() -> None:
     # Step 4: Restore data
     old_prompt_table = sa.table(
         'prompt',
-        sa.column('command', sa.String()),
-        sa.column('user_id', sa.String()),
+        sa.column('command', sa.String(255)),
+        sa.column('user_id', sa.String(255)),
         sa.column('title', sa.Text()),
         sa.column('content', sa.Text()),
         sa.column('timestamp', sa.BigInteger()),

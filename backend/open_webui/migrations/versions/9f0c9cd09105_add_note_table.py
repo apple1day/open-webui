@@ -23,7 +23,7 @@ def upgrade():
     if 'note' not in existing_tables:
         op.create_table(
             'note',
-            sa.Column('id', sa.Text(), nullable=False, primary_key=True, unique=True),
+            sa.Column('id', sa.String(255), nullable=False, primary_key=True, unique=True),
             sa.Column('user_id', sa.Text(), nullable=True),
             sa.Column('title', sa.Text(), nullable=True),
             sa.Column('data', sa.JSON(), nullable=True),
