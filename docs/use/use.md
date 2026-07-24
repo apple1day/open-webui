@@ -256,7 +256,11 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 
 ./venv/bin/python scripts/video_tasks.py --config docs/json/even-path.json --ollama-url http://localhost:11434
 
+cd /Users/even/mine/some 
+mv *.md *.srt /Users/even/mine/my-webui/logs/md
 
+#下班后可以拉取这个大模型，或者中午的时候拉取
+ollama pull qwen3-coder:30b
 
 ```
 
