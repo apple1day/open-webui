@@ -14,6 +14,11 @@
     "cache_dir": "~/.video_analysis_cache",
     "gpu_enabled": true,
     "skip_existing": true,
+    "blur_delete_enabled": true,
+    "blur_delete_threshold": 100.0,
+    "blur_delete_skip": true,
+    "blur_delete_log": "logs/delete.log",
+    "blur_delete_script": "logs/delete.sh",
     "tasks": [
         {
             "video_dir": "/Users/even/mine/some",

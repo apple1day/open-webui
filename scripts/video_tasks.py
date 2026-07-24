@@ -140,6 +140,14 @@ DEFAULT_QUALITY_DARK_THRESHOLD = 30.0   # 平均亮度下限（小于此值认�
 DEFAULT_QUALITY_BRIGHT_THRESHOLD = 225.0  # 平均亮度上限（大于此值认为是过曝帧）
 DEFAULT_QUALITY_STATIC_THRESHOLD = 0.98  # 帧间相似度阈值（大于此值认为是静态帧，与上一帧几乎相同）
 
+# 模糊视频清理（用于批量筛除「整段模糊」的低质量视频）
+DEFAULT_BLUR_DELETE_ENABLED = False  # 是否开启「整段模糊检测」
+DEFAULT_BLUR_DELETE_THRESHOLD = 100.0  # 全片平均拉普拉斯方差阈值；低于它判定为模糊（整段）
+DEFAULT_BLUR_DELETE_SAMPLE = 10       # 抽多少帧估算整体清晰度（越多越准越慢）
+DEFAULT_BLUR_DELETE_SKIP = True       # 判为模糊后是否跳过昂贵的逐帧/汇总分析（直接记录待删）
+DEFAULT_BLUR_DELETE_LOG = 'logs/delete.log'    # 模糊视频记录文件
+DEFAULT_BLUR_DELETE_SCRIPT = 'logs/delete.sh'  # 生成的 rm -rf 删除脚本
+
 # 长视频分段配置
 DEFAULT_SEGMENT_ENABLED = False   # 是否启用长视频分段处理
 DEFAULT_SEGMENT_DURATION = 600.0  # 每段时长（秒），默认10分钟
@@ -458,6 +466,109 @@ def _log_frame_detail(video_path: str, idx: int, ts: float, desc: str) -> None:
         _LOG_FILE.flush()
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# 0.1) 模糊视频清理：检测整段模糊的视频并记录到 delete.log、生成删除脚本
+# --------------------------------------------------------------------------- #
+DELETE_LOG_PATH = None       # 模糊视频记录文件路径（main 中按配置设置）
+DELETE_SCRIPT_PATH = None    # 生成的 rm -rf 删除脚本路径（main 中按配置设置）
+_BLUR_RECORDED: set = set()  # 本次运行已记录的模糊视频（去重，内存兜底）
+
+
+def assess_video_blur(video_path: str, sample_count: int = DEFAULT_BLUR_DELETE_SAMPLE) -> Optional[float]:
+    """估算整段视频的清晰度：均匀抽 ``sample_count`` 帧，返回平均拉普拉斯方差。
+
+    返回值越小越模糊（沿用逐帧模糊判定的同一量纲，阈值与 ``quality_blur_threshold`` 一致）。
+    - 需要 numpy；缺失或无法解码时返回 ``None``（视为「无法判定」）。
+    - 仅作抽样粗估，开销远低于逐帧识别。
+    """
+    if not _HAVE_NUMPY:
+        return None
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total <= 0:
+            return None
+        sample_count = max(1, min(int(sample_count), total))
+        # 均匀铺满全片（含首末帧）的帧索引
+        idxs = sorted({int(round(i * (total - 1) / max(1, sample_count - 1))) for i in range(sample_count)})
+        variances = []
+        for fi in idxs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            try:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                variances.append(cv2.Laplacian(gray, cv2.CV_64F).var())
+            except Exception:
+                pass
+        if not variances:
+            return None
+        return sum(variances) / len(variances)
+    finally:
+        cap.release()
+
+
+def record_blurry_video(video_path: str, avg_variance: float) -> None:
+    """把判为模糊的视频记录到 ``delete.log``，并在内存中留底（用于生成删除脚本）。"""
+    global _BLUR_RECORDED
+    abspath = os.path.abspath(os.path.expanduser(video_path))
+    _BLUR_RECORDED.add(abspath)
+    if DELETE_LOG_PATH:
+        try:
+            d = os.path.dirname(os.path.abspath(DELETE_LOG_PATH))
+            os.makedirs(d, exist_ok=True)
+            with open(DELETE_LOG_PATH, 'a', encoding='utf-8') as f:
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                f.write(f'{ts} | BLUR | avg_laplacian={avg_variance:.2f} | {abspath}\n')
+                f.flush()
+        except Exception as exc:
+            _c('WARN', f'写入 delete.log 失败：{exc}')
+    _c('WARN', f'视频判定为模糊（平均拉普拉斯方差={avg_variance:.2f}），已记录：{abspath}')
+
+
+def generate_delete_script() -> None:
+    """根据 ``delete.log`` 中记录的全部模糊视频，生成 ``rm -rf`` 删除脚本（去重）。"""
+    if not DELETE_SCRIPT_PATH:
+        return
+    paths: list[str] = []
+    seen: set[str] = set()
+    # 优先从 delete.log 解析（含历史运行积累），再补本次内存记录
+    if DELETE_LOG_PATH and os.path.isfile(DELETE_LOG_PATH):
+        try:
+            with open(DELETE_LOG_PATH, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or ' | BLUR | ' not in line:
+                        continue
+                    p = line.split(' | ')[-1].strip()
+                    if p and p not in seen:
+                        seen.add(p)
+                        paths.append(p)
+        except Exception:
+            pass
+    for p in sorted(_BLUR_RECORDED):
+        if p not in seen:
+            seen.add(p)
+            paths.append(p)
+    try:
+        d = os.path.dirname(os.path.abspath(DELETE_SCRIPT_PATH))
+        os.makedirs(d, exist_ok=True)
+        with open(DELETE_SCRIPT_PATH, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/bash\n')
+            f.write('# 由 video_tasks.py 自动生成：删除被判为「模糊」的视频文件。\n')
+            f.write('# 请人工核对列表后再执行：bash delete.sh\n')
+            f.write(f'# 生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
+            f.write(f'# 待删除文件数：{len(paths)}\n\n')
+            for p in paths:
+                f.write(f'rm -rf "{p}"\n')
+        _c('OK', f'已生成删除脚本（{len(paths)} 个文件）：{DELETE_SCRIPT_PATH}')
+    except Exception as exc:
+        _c('WARN', f'生成删除脚本失败：{exc}')
 
 
 def _c(tag: str, msg: str) -> None:
@@ -1834,6 +1945,23 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         _c('ERR', f'不支持的视频格式：{video_path}')
         return
 
+    # ===== 模糊视频清理：整段模糊则记录到 delete.log，并按需跳过进一步分析 =====
+    blur_delete_enabled = bool(task.get('blur_delete_enabled', defaults.get('blur_delete_enabled', DEFAULT_BLUR_DELETE_ENABLED)))
+    if blur_delete_enabled:
+        blur_threshold = float(task.get('blur_delete_threshold', defaults.get('blur_delete_threshold', DEFAULT_BLUR_DELETE_THRESHOLD)))
+        blur_skip = bool(task.get('blur_delete_skip', defaults.get('blur_delete_skip', DEFAULT_BLUR_DELETE_SKIP)))
+        blur_sample = int(task.get('blur_delete_sample', defaults.get('blur_delete_sample', DEFAULT_BLUR_DELETE_SAMPLE)))
+        avg_var = assess_video_blur(video_path, blur_sample)
+        if avg_var is None:
+            _c('WARN', '无法估算视频清晰度（缺 numpy 或解码失败），跳过模糊判定')
+        elif avg_var < blur_threshold:
+            record_blurry_video(video_path, avg_var)
+            if blur_skip:
+                _c('INFO', f'模糊视频跳过进一步分析：{video_path}')
+                return
+        else:
+            _c('INFO', f'清晰度检查通过（平均拉普拉斯方差={avg_var:.2f} ≥ {blur_threshold}）')
+
     # 后端选择：视觉与汇总可分别走 ollama 或 mlx（Apple Silicon 原生）。
     vision_backend = str(task.get('backend') or defaults.get('backend') or 'ollama').lower()
     summary_backend = str(task.get('summary_backend') or defaults.get('summary_backend') or vision_backend).lower()
@@ -2458,6 +2586,17 @@ def main() -> int:
                         help='守护模式：持续监控 --video-dir，发现新视频自动分析（配合 --skip-existing 实现增量）')
     parser.add_argument('--watch-interval', type=int, default=300,
                         help='守护模式的扫描间隔（秒，默认300）。仅在 --watch 模式下生效')
+    # 模糊视频清理相关开关
+    parser.add_argument('--blur-delete', action='store_true',
+                        help='开启「整段模糊检测」：判为模糊的视频记录到 delete.log 并生成删除脚本')
+    parser.add_argument('--blur-threshold', type=float, default=None,
+                        help='整段模糊判定阈值（平均拉普拉斯方差；低于即模糊，默认100）')
+    parser.add_argument('--blur-delete-log', default=None,
+                        help='模糊视频记录文件路径（默认 logs/delete.log）')
+    parser.add_argument('--blur-delete-script', default=None,
+                        help='生成的 rm -rf 删除脚本路径（默认 logs/delete.sh）')
+    parser.add_argument('--blur-delete-skip', action='store_true', default=None,
+                        help='判为模糊后跳过昂贵的逐帧/汇总分析（默认开启）')
     args = parser.parse_args()
 
     if not os.path.isfile(args.config):
@@ -2478,6 +2617,27 @@ def main() -> int:
         cfg['mlx_summary_model'] = args.mlx_summary_model
     if args.skip_existing:
         cfg['skip_existing'] = True
+
+    # CLI 模糊清理开关覆盖到配置
+    if args.blur_delete:
+        cfg['blur_delete_enabled'] = True
+        if args.blur_delete_skip is None:
+            cfg['blur_delete_skip'] = True
+    if args.blur_threshold is not None:
+        cfg['blur_delete_threshold'] = args.blur_threshold
+    if args.blur_delete_skip is not None:
+        cfg['blur_delete_skip'] = args.blur_delete_skip
+
+    # 模糊视频清理：记录文件与删除脚本路径（全局，供 run_task 内调用）
+    global DELETE_LOG_PATH, DELETE_SCRIPT_PATH
+    DELETE_LOG_PATH = cfg.get('blur_delete_log') or DEFAULT_BLUR_DELETE_LOG
+    DELETE_SCRIPT_PATH = cfg.get('blur_delete_script') or DEFAULT_BLUR_DELETE_SCRIPT
+    if args.blur_delete_log:
+        DELETE_LOG_PATH = args.blur_delete_log
+    if args.blur_delete_script:
+        DELETE_SCRIPT_PATH = args.blur_delete_script
+    DELETE_LOG_PATH = os.path.expanduser(DELETE_LOG_PATH)
+    DELETE_SCRIPT_PATH = os.path.expanduser(DELETE_SCRIPT_PATH)
 
     # 日志文件：把运行日志（含每帧去重/质量过滤/识别结果）写入 logs/ 下的文件
     log_file = args.log_file or cfg.get('log_file')
@@ -2570,6 +2730,7 @@ def main() -> int:
                 time.sleep(10)
 
         _c('OK', '守护模式已停止。')
+        generate_delete_script()
         return 0
 
     # 把含 video_dir 的任务展开成「每个视频一个任务」
@@ -2610,6 +2771,7 @@ def main() -> int:
         except Exception as exc:
             _c('ERR', f'任务异常（{task.get("video_path", "?")}）：{exc}')
     _c('OK', '全部视频任务执行完毕。')
+    generate_delete_script()
     close_log_file()
     return 0
 
