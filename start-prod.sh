@@ -94,7 +94,10 @@ else
   if [[ -f "$SCRIPT_DIR/.env" ]]; then
     DATABASE_URL="$(grep -E '^[[:space:]]*DATABASE_URL=' "$SCRIPT_DIR/.env" | head -1 | cut -d= -f2- | sed -E "s/^[[:space:]]*['\"]|['\"]$//g")"
   fi
-  DATABASE_URL="${DATABASE_URL:-mysql+aiomysql://root:123456@127.0.0.1:3306/webui}"
+  # 注意：DATABASE_URL 必须是「同步」驱动 (mysql+pymysql)，启动用的同步引擎
+  # 依赖它；异步引擎会由 open_webui/internal/db.py 的 _make_async_url 自动把
+  # mysql+pymysql 转成 mysql+aiomysql。不要在这里直接用 mysql+aiomysql。
+  DATABASE_URL="${DATABASE_URL:-mysql+pymysql://root:123456@127.0.0.1:3306/webui}"
   export DATABASE_URL
   c_info "数据库: MySQL ($DATABASE_URL)"
 fi
