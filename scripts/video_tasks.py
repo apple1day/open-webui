@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime
@@ -558,12 +559,8 @@ def generate_delete_script() -> None:
     try:
         d = os.path.dirname(os.path.abspath(DELETE_SCRIPT_PATH))
         os.makedirs(d, exist_ok=True)
+        # 纯 rm -rf 行，可直接执行（无头部/注释）
         with open(DELETE_SCRIPT_PATH, 'w', encoding='utf-8') as f:
-            f.write('#!/bin/bash\n')
-            f.write('# 由 video_tasks.py 自动生成：删除被判为「模糊」的视频文件。\n')
-            f.write('# 请人工核对列表后再执行：bash delete.sh\n')
-            f.write(f'# 生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
-            f.write(f'# 待删除文件数：{len(paths)}\n\n')
             for p in paths:
                 f.write(f'rm -rf "{p}"\n')
         _c('OK', f'已生成删除脚本（{len(paths)} 个文件）：{DELETE_SCRIPT_PATH}')
@@ -1276,6 +1273,28 @@ def chat(backend, ollama_url, model, content, images=None, *,
 # faster-whisper 内部用 PyAV 直接从视频解码音轨，无需系统安装 ffmpeg。
 # --------------------------------------------------------------------------- #
 _WHISPER_CACHE: dict = {}  # 同一进程内复用已加载的模型，避免重复初始化
+_WHISPER_LOCK = threading.Lock()  # 防止并发任务同时初始化同一模型
+
+# 异步 ASR：全进程共享的单工位执行器。
+# 单工位原因：whisper 本身已多线程吃满 CPU，多个转写同时跑只会互相争抢变慢；
+# 排队串行 + 与逐帧识别/OCR 重叠，才是最优组合。
+_ASR_EXECUTOR = None
+_ASR_EXECUTOR_LOCK = threading.Lock()
+
+
+def submit_transcribe_async(video_path: str, whisper_model: str,
+                            language: Optional[str] = None):
+    """把音频转写提交到后台执行器，立即返回 Future（不阻塞主流程）。
+
+    Future.result() 返回 ``(full_text, segments)``，与 transcribe_audio 一致。
+    """
+    global _ASR_EXECUTOR
+    from concurrent.futures import ThreadPoolExecutor
+    with _ASR_EXECUTOR_LOCK:
+        if _ASR_EXECUTOR is None:
+            _ASR_EXECUTOR = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix='asr')
+    return _ASR_EXECUTOR.submit(transcribe_audio, video_path, whisper_model, language)
 
 
 def _srt_ts(seconds: float) -> str:
@@ -1299,15 +1318,18 @@ def transcribe_audio(video_path: str, whisper_model: str, language: Optional[str
         _c('WARN', f'未安装 faster-whisper，跳过音频转写：{exc}')
         return '', []
 
-    model = _WHISPER_CACHE.get(whisper_model)
-    if model is None:
-        _c('INFO', f'加载 Whisper 模型「{whisper_model}」(首次会下载/初始化, CPU int8)…')
-        try:
-            model = WhisperModel(whisper_model, device='cpu', compute_type='int8')
-        except Exception as exc:
-            _c('WARN', f'加载 Whisper 失败，跳过音频：{exc}')
-            return '', []
-        _WHISPER_CACHE[whisper_model] = model
+    with _WHISPER_LOCK:
+        model = _WHISPER_CACHE.get(whisper_model)
+        if model is None:
+            _c('INFO', f'加载 Whisper 模型「{whisper_model}」(首次会下载/初始化, CPU int8)…')
+            try:
+                # cpu_threads 默认只有 4，这里用满物理核心数以提升 CPU 利用率
+                model = WhisperModel(whisper_model, device='cpu', compute_type='int8',
+                                     cpu_threads=max(4, os.cpu_count() or 4))
+            except Exception as exc:
+                _c('WARN', f'加载 Whisper 失败，跳过音频：{exc}')
+                return '', []
+            _WHISPER_CACHE[whisper_model] = model
 
     try:
         segments, _info = model.transcribe(video_path, beam_size=5, language=language or None)
@@ -1956,6 +1978,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
             _c('WARN', '无法估算视频清晰度（缺 numpy 或解码失败），跳过模糊判定')
         elif avg_var < blur_threshold:
             record_blurry_video(video_path, avg_var)
+            generate_delete_script()  # 立即更新删除脚本，便于中途直接执行
             if blur_skip:
                 _c('INFO', f'模糊视频跳过进一步分析：{video_path}')
                 return
@@ -2070,6 +2093,14 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     _c('OK', f'参数 → 时长 {meta["duration_hms"]} ({meta["duration_sec"]}s) | '
              f'分辨率 {meta["resolution"]} | {meta["fps"]}fps | 编码 {meta["codec"]} | {meta["size_mb"]}MB')
 
+    # 1.5) 音频转写异步化：提交到全局单工位执行器后立即返回，不阻塞主流程。
+    # 主流程继续做抽帧 → 逐帧识别 → OCR（等 Ollama 时 CPU 空闲，whisper 恰好补位），
+    # 直到汇总前才取结果（Future.result）。
+    asr_future = None
+    if include_audio:
+        _c('INFO', f'音频转写已提交后台队列（faster-whisper / {whisper_model}），不阻塞主流程…')
+        asr_future = submit_transcribe_async(video_path, whisper_model, whisper_language)
+
     # 2) 抽帧（按 sample_mode 选择抽样策略；可「时间换精度」）
     # 检查是否需要分段处理（长视频）
     segment_enabled = bool(task.get('segment_enabled', defaults.get('segment_enabled', DEFAULT_SEGMENT_ENABLED)))
@@ -2156,6 +2187,8 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
 
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
+        if asr_future is not None:
+            asr_future.cancel()  # 还在排队则直接取消，避免白跑
         return
     _c('INFO', f'已抽取 {len(frames)} 帧，使用视觉模型 [{vision_backend}] {model} 逐帧识别…')
     
@@ -2273,21 +2306,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         _log_frame_detail(video_path, idx, ts, desc)
     _log_to_file('OK', f'逐帧识别完成：共 {len(frame_results)} 帧结果已写入日志')
 
-    # 3.5) 可选：音频转写（faster-whisper）
-    transcript, segments, srt_path = '', [], None
-    if include_audio:
-        _c('INFO', f'转写音频（faster-whisper / {whisper_model}）…')
-        transcript, segments = transcribe_audio(video_path, whisper_model, whisper_language)
-        if transcript:
-            _c('OK', f'音频转写完成（{len(transcript)} 字，{len(segments)} 段）')
-            if save_report:
-                srt_path = write_srt(video_path, segments, output_dir=output_dir)
-                if srt_path:
-                    _c('OK', f'字幕已导出 → {srt_path}')
-        else:
-            _c('WARN', '未获得音频转写文本（可能无音轨或 faster-whisper 不可用）')
-    
-    # 3.6) 可选：硬字幕OCR（PaddleOCR）—— ocr_enabled 已在抽帧前统一定义
+    # 3.5) 可选：硬字幕OCR（PaddleOCR）—— 先跑 OCR，让后台音频转写继续与之重叠
     ocr_results = {}
     if ocr_enabled:
         ocr_interval = float(task.get('ocr_interval', defaults.get('ocr_interval', DEFAULT_OCR_INTERVAL)))
@@ -2306,6 +2325,25 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
             _c('OK', f'OCR识别完成（在 {len(ocr_results)} 帧中识别到 {total_text_regions} 个文本区域）')
         else:
             _c('WARN', '未识别到硬字幕文字（可能视频无字幕或 PaddleOCR 不可用）')
+
+    # 3.6) 可选：音频转写结果回收——汇总必须用到，此处才真正等待（其余阶段均未阻塞）
+    transcript, segments, srt_path = '', [], None
+    if include_audio and asr_future is not None:
+        if not asr_future.done():
+            _c('INFO', '等待后台音频转写完成…')
+        try:
+            transcript, segments = asr_future.result()
+        except Exception as exc:
+            _c('WARN', f'后台音频转写异常：{exc}')
+            transcript, segments = '', []
+        if transcript:
+            _c('OK', f'音频转写完成（{len(transcript)} 字，{len(segments)} 段）')
+            if save_report:
+                srt_path = write_srt(video_path, segments, output_dir=output_dir)
+                if srt_path:
+                    _c('OK', f'字幕已导出 → {srt_path}')
+        else:
+            _c('WARN', '未获得音频转写文本（可能无音轨或 faster-whisper 不可用）')
 
     # 4) 汇总（结合画面 + 音频 + OCR）- 笔记模式使用专用汇总提示词
     _c('INFO', f'使用 [{summary_backend}] {summary_model} 汇总…')
@@ -2597,6 +2635,9 @@ def main() -> int:
                         help='生成的 rm -rf 删除脚本路径（默认 logs/delete.sh）')
     parser.add_argument('--blur-delete-skip', action='store_true', default=None,
                         help='判为模糊后跳过昂贵的逐帧/汇总分析（默认开启）')
+    parser.add_argument('--task-workers', type=int, default=None,
+                        help='同时处理的视频任务数（默认1=串行；2-3 可让一个视频等待 Ollama 时'
+                             '另一个视频做抽帧/转写等 CPU 工作，提升整体 CPU 利用率）')
     args = parser.parse_args()
 
     if not os.path.isfile(args.config):
@@ -2763,13 +2804,33 @@ def main() -> int:
     device_cap = detect_device_capability()
     _c('INFO', f'设备能力探测：{_cap_to_labels(device_cap)}')
 
-    for i, task in enumerate(tasks, 1):
+    def _run_one(i: int, task: dict) -> None:
         _c('INFO', f'==== 任务 {i}/{len(tasks)} ====')
         try:
             _reconcile_capabilities(task, cfg, device_cap)
             run_task(task, cfg, ollama_url)
         except Exception as exc:
             _c('ERR', f'任务异常（{task.get("video_path", "?")}）：{exc}')
+
+    task_workers = args.task_workers if args.task_workers is not None else int(cfg.get('task_workers', 1) or 1)
+    task_workers = max(1, min(task_workers, 4))
+    # 笔记模式依赖全局 _FRAME_FILES，非线程安全，含此类任务时强制串行
+    if task_workers > 1 and any(t.get('notebook_mode') for t in tasks):
+        _c('WARN', '检测到 notebook_mode 任务，任务级并行已降级为串行（notebook 模式非线程安全）')
+        task_workers = 1
+
+    if task_workers > 1 and len(tasks) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        # 并行时关闭流式打印，避免多个任务的输出交错成乱码
+        cfg['stream_log'] = False
+        _c('INFO', f'任务级并行已启用（workers={task_workers}，已自动关闭流式打印）')
+        with ThreadPoolExecutor(max_workers=task_workers) as pool:
+            futures = [pool.submit(_run_one, i, task) for i, task in enumerate(tasks, 1)]
+            for fu in futures:
+                fu.result()
+    else:
+        for i, task in enumerate(tasks, 1):
+            _run_one(i, task)
     _c('OK', '全部视频任务执行完毕。')
     generate_delete_script()
     close_log_file()
