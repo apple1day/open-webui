@@ -1275,26 +1275,89 @@ def chat(backend, ollama_url, model, content, images=None, *,
 _WHISPER_CACHE: dict = {}  # 同一进程内复用已加载的模型，避免重复初始化
 _WHISPER_LOCK = threading.Lock()  # 防止并发任务同时初始化同一模型
 
-# 异步 ASR：全进程共享的单工位执行器。
-# 单工位原因：whisper 本身已多线程吃满 CPU，多个转写同时跑只会互相争抢变慢；
-# 排队串行 + 与逐帧识别/OCR 重叠，才是最优组合。
-_ASR_EXECUTOR = None
-_ASR_EXECUTOR_LOCK = threading.Lock()
+# 异步 ASR：在「独立子进程」中运行（真正脱离主流程的线程/GIL，且不占用主进程内存）。
+# 单进程单任务原因：whisper 本身已多线程吃满 CPU，多个转写同时跑只会互相争抢变慢；
+# 与逐帧识别/OCR 重叠才是最优组合。子进程写出 ``<base>.transcript.json``，
+# 在 --no-wait-audio 场景下还会写出 ``.srt`` 并把音频章节注入已生成的报告。
+def run_asr_detached(video_path: str, whisper_model: str, language,
+                     output_dir, report_path: Optional[str] = None,
+                     notebook: bool = False):
+    """在独立子进程里跑音频转写，立即返回 ``(proc, sidecar_path)``，不阻塞主流程。"""
+    import subprocess
+    base = _out_base(video_path, output_dir)
+    sidecar = f'{base}.transcript.json'
+    cmd = [sys.executable, os.path.abspath(__file__), '--_asr-worker',
+           '--video-path', video_path, '--whisper-model', whisper_model]
+    if language:
+        cmd += ['--whisper-language', language]
+    if output_dir:
+        cmd += ['--output-dir', output_dir]
+    if report_path:
+        # 仅 --no-wait-audio 场景：子进程自己写 srt 并在报告生成后注入音频章节
+        cmd += ['--srt', '--report-path', report_path]
+        if notebook:
+            cmd += ['--notebook']
+    # start_new_session=True：脱离父进程会话，父进程退出后子进程仍可继续跑完
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
+    return proc, sidecar
 
 
-def submit_transcribe_async(video_path: str, whisper_model: str,
-                            language: Optional[str] = None):
-    """把音频转写提交到后台执行器，立即返回 Future（不阻塞主流程）。
+_AUDIO_MARKER = '<!-- AUDIO_PENDING -->'
 
-    Future.result() 返回 ``(full_text, segments)``，与 transcribe_audio 一致。
-    """
-    global _ASR_EXECUTOR
-    from concurrent.futures import ThreadPoolExecutor
-    with _ASR_EXECUTOR_LOCK:
-        if _ASR_EXECUTOR is None:
-            _ASR_EXECUTOR = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix='asr')
-    return _ASR_EXECUTOR.submit(transcribe_audio, video_path, whisper_model, language)
+
+def _render_audio_section(transcript: str, srt_path, notebook: bool = False) -> str:
+    """渲染报告里的「音频转写」章节（与 write_report 风格保持一致）。"""
+    if not transcript:
+        return '_（音频转写无结果）_'
+    if notebook:
+        lines = ['## 音频转写 / Transcript', '']
+        if srt_path:
+            lines += [f'> 字幕文件 / SRT: `{os.path.basename(srt_path)}`', '']
+    else:
+        lines = ['## 🎤 音频转写 / Audio Transcript', '']
+        if srt_path:
+            lines += [f'> 字幕文件: `{os.path.basename(srt_path)}`', '']
+    lines += [transcript, '']
+    return '\n'.join(lines)
+
+
+def _asr_worker_main(args) -> int:
+    """隐藏子命令：只做音频转写并写 sidecar（可选注入报告），随后退出。"""
+    _c('INFO', f'[asr-worker] 独立子进程开始转写：{args.video_path}')
+    transcript, segs = transcribe_audio(args.video_path, args.whisper_model,
+                                        args.whisper_language)
+    sidecar = f'{_out_base(args.video_path, args.output_dir)}.transcript.json'
+    try:
+        with open(sidecar, 'w', encoding='utf-8') as f:
+            json.dump({'transcript': transcript,
+                       'segments': [{'start': s, 'end': e, 'text': t} for s, e, t in segs]},
+                      f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        _c('WARN', f'[asr-worker] 写出 transcript.json 失败：{exc}')
+    srt_path = None
+    if getattr(args, 'srt', False):
+        srt_path = write_srt(args.video_path, segs, output_dir=args.output_dir)
+    # 轮询等待报告生成（主流程可能后写），再把音频章节注入（替换占位符）
+    report_path = getattr(args, 'report_path', None)
+    if report_path:
+        section = _render_audio_section(transcript, srt_path,
+                                        notebook=bool(getattr(args, 'notebook', False)))
+        for _ in range(600):  # 最多等待 ~10 分钟
+            try:
+                if os.path.isfile(report_path):
+                    with open(report_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    if _AUDIO_MARKER in content:
+                        content = content.replace(_AUDIO_MARKER, section, 1)
+                        with open(report_path, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        _c('OK', f'[asr-worker] 已把音频章节注入报告 → {report_path}')
+                        break
+            except Exception:
+                pass
+            time.sleep(1)
+    return 0
 
 
 def _srt_ts(seconds: float) -> str:
@@ -1958,7 +2021,8 @@ def notebook_summary_prompt(language: str, meta: dict, style: str = 'education',
 # --------------------------------------------------------------------------- #
 # 单个任务
 # --------------------------------------------------------------------------- #
-def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
+def run_task(task: dict, defaults: dict, ollama_url: str,
+             no_wait_audio: bool = False) -> None:
     video_path = os.path.expanduser(task['video_path'])
     if not os.path.isfile(video_path):
         _c('ERR', f'视频不存在：{video_path}')
@@ -2093,13 +2157,19 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
     _c('OK', f'参数 → 时长 {meta["duration_hms"]} ({meta["duration_sec"]}s) | '
              f'分辨率 {meta["resolution"]} | {meta["fps"]}fps | 编码 {meta["codec"]} | {meta["size_mb"]}MB')
 
-    # 1.5) 音频转写异步化：提交到全局单工位执行器后立即返回，不阻塞主流程。
+    # 1.5) 音频转写异步化：在独立子进程中运行，立即返回、不阻塞主流程。
     # 主流程继续做抽帧 → 逐帧识别 → OCR（等 Ollama 时 CPU 空闲，whisper 恰好补位），
-    # 直到汇总前才取结果（Future.result）。
-    asr_future = None
+    # 直到汇总前才取结果；--no-wait-audio 时连汇总都不等，报告由子进程稍后补全。
+    asr_proc, asr_sidecar = None, None
     if include_audio:
-        _c('INFO', f'音频转写已提交后台队列（faster-whisper / {whisper_model}），不阻塞主流程…')
-        asr_future = submit_transcribe_async(video_path, whisper_model, whisper_language)
+        report_base = (f'{_out_base(video_path, output_dir)}.notebook.md'
+                       if notebook_mode else
+                       f'{_out_base(video_path, output_dir)}.analysis.md')
+        _c('INFO', f'音频转写已提交独立子进程（faster-whisper / {whisper_model}），不阻塞主流程…')
+        asr_proc, asr_sidecar = run_asr_detached(
+            video_path, whisper_model, whisper_language, output_dir,
+            report_path=report_base if (no_wait_audio and save_report) else None,
+            notebook=notebook_mode)
 
     # 2) 抽帧（按 sample_mode 选择抽样策略；可「时间换精度」）
     # 检查是否需要分段处理（长视频）
@@ -2187,8 +2257,8 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
 
     if not frames:
         _c('ERR', '未能从视频解码出任何帧')
-        if asr_future is not None:
-            asr_future.cancel()  # 还在排队则直接取消，避免白跑
+        if asr_proc is not None and asr_proc.poll() is None:
+            asr_proc.terminate()  # 主流程已失败，终止还在跑的转写子进程
         return
     _c('INFO', f'已抽取 {len(frames)} 帧，使用视觉模型 [{vision_backend}] {model} 逐帧识别…')
     
@@ -2326,24 +2396,45 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
         else:
             _c('WARN', '未识别到硬字幕文字（可能视频无字幕或 PaddleOCR 不可用）')
 
-    # 3.6) 可选：音频转写结果回收——汇总必须用到，此处才真正等待（其余阶段均未阻塞）
+    # 3.6) 可选：音频转写结果回收
     transcript, segments, srt_path = '', [], None
-    if include_audio and asr_future is not None:
-        if not asr_future.done():
-            _c('INFO', '等待后台音频转写完成…')
-        try:
-            transcript, segments = asr_future.result()
-        except Exception as exc:
-            _c('WARN', f'后台音频转写异常：{exc}')
-            transcript, segments = '', []
-        if transcript:
-            _c('OK', f'音频转写完成（{len(transcript)} 字，{len(segments)} 段）')
-            if save_report:
+    if include_audio and asr_proc is not None:
+        if no_wait_audio:
+            # 不阻塞：若 sidecar 已就绪则顺手读取；否则留待子进程注入报告
+            if os.path.isfile(asr_sidecar):
+                try:
+                    with open(asr_sidecar, 'r', encoding='utf-8') as f:
+                        d = json.load(f)
+                    transcript = d.get('transcript', '')
+                    segments = [(s['start'], s['end'], s['text']) for s in d.get('segments', [])]
+                except Exception:
+                    pass
+            if transcript:
+                _c('OK', f'音频转写已完成（{len(transcript)} 字，{len(segments)} 段）')
+                srt_path = write_srt(video_path, segments, output_dir=output_dir)
+            else:
+                _c('INFO', '音频转写仍在后台独立子进程中运行，报告将稍后由其补全（--no-wait-audio）')
+        else:
+            # 阻塞等待子进程完成后再读结果
+            if asr_proc.poll() is None:
+                _c('INFO', '等待后台音频转写完成…')
+                asr_proc.wait()
+            try:
+                with open(asr_sidecar, 'r', encoding='utf-8') as f:
+                    d = json.load(f)
+                transcript = d.get('transcript', '')
+                segments = [(s['start'], s['end'], s['text']) for s in d.get('segments', [])]
+            except Exception as exc:
+                _c('WARN', f'读取音频转写结果失败：{exc}')
+            if transcript:
+                _c('OK', f'音频转写完成（{len(transcript)} 字，{len(segments)} 段）')
                 srt_path = write_srt(video_path, segments, output_dir=output_dir)
                 if srt_path:
                     _c('OK', f'字幕已导出 → {srt_path}')
-        else:
-            _c('WARN', '未获得音频转写文本（可能无音轨或 faster-whisper 不可用）')
+            else:
+                _c('WARN', '未获得音频转写文本（可能无音轨或 faster-whisper 不可用）')
+    # 是否报告里先放占位符、留待子进程注入（仅 --no-wait-audio 且尚未就绪时）
+    audio_pending = bool(no_wait_audio and not transcript)
 
     # 4) 汇总（结合画面 + 音频 + OCR）- 笔记模式使用专用汇总提示词
     _c('INFO', f'使用 [{summary_backend}] {summary_model} 汇总…')
@@ -2399,6 +2490,7 @@ def run_task(task: dict, defaults: dict, ollama_url: str) -> None:
             ocr_results=ocr_results if ocr_enabled else None,
             notebook_mode=notebook_mode,
             notebook_style=notebook_style,
+            audio_pending=audio_pending,
         )
         _c('OK', f'报告已保存 → {report_path}')
 
@@ -2408,7 +2500,8 @@ def write_report(video_path, model, summary_model, meta, frame_results, summary,
                  output_dir: Optional[str] = None,
                  ocr_results: Optional[dict] = None,
                  notebook_mode: bool = False,
-                 notebook_style: str = 'education') -> str:
+                 notebook_style: str = 'education',
+                 audio_pending: bool = False) -> str:
     """写分析报告，支持笔记模式（嵌入帧截图）。"""
     # 笔记模式使用不同的文件后缀
     if notebook_mode:
@@ -2493,6 +2586,9 @@ def write_report(video_path, model, summary_model, meta, frame_results, summary,
             if srt_path:
                 lines += [f'> 字幕文件: `{os.path.basename(srt_path)}`', '']
             lines += [transcript, '']
+        elif audio_pending:
+            # --no-wait-audio：先留占位符，由独立子进程转写完成后注入
+            lines += ['## 🎤 音频转写 / Audio Transcript', '', _AUDIO_MARKER, '']
         
     else:
         # 普通分析模式（原有逻辑）
@@ -2524,6 +2620,9 @@ def write_report(video_path, model, summary_model, meta, frame_results, summary,
             if srt_path:
                 lines += [f'> 字幕文件 / SRT: `{os.path.basename(srt_path)}`', '']
             lines += [transcript, '']
+        elif audio_pending:
+            # --no-wait-audio：先留占位符，由独立子进程转写完成后注入
+            lines += ['---', '', '## 音频转写 / Transcript', '', _AUDIO_MARKER, '']
         
         # 添加OCR结果
         if ocr_results:
@@ -2638,7 +2737,22 @@ def main() -> int:
     parser.add_argument('--task-workers', type=int, default=None,
                         help='同时处理的视频任务数（默认1=串行；2-3 可让一个视频等待 Ollama 时'
                              '另一个视频做抽帧/转写等 CPU 工作，提升整体 CPU 利用率）')
+    parser.add_argument('--no-wait-audio', action='store_true',
+                        help='音频转写完全脱离主流程：不等待、直接写报告，'
+                             '转写由独立子进程在后台跑完后再把音频章节补全（默认仍等待以保证报告完整）')
+    # 隐藏子命令：被 run_asr_detached 调用，只做音频转写，不对外暴露
+    parser.add_argument('--_asr-worker', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--video-path', default='', help=argparse.SUPPRESS)
+    parser.add_argument('--whisper-language', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--output-dir', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--srt', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--report-path', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--notebook', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    # 隐藏模式：独立子进程只做音频转写，写完 sidecar（并可选地注入报告）后退出
+    if getattr(args, '_asr_worker', False):
+        return _asr_worker_main(args)
 
     if not os.path.isfile(args.config):
         _c('ERR', f'未找到配置文件：{args.config}')
@@ -2754,7 +2868,8 @@ def main() -> int:
                         _c('INFO', f'==== 守护任务: {os.path.basename(vp)} ====')
                         try:
                             _reconcile_capabilities(task, cfg, device_cap)
-                            run_task(task, cfg, ollama_url)
+                            run_task(task, cfg, ollama_url,
+                                     no_wait_audio=args.no_wait_audio)
                         except Exception as exc:
                             _c('ERR', f'守护任务异常（{vp}）：{exc}')
                     _c('OK', f'本轮分析完成，{len(new_videos)} 个视频已处理')
@@ -2808,7 +2923,7 @@ def main() -> int:
         _c('INFO', f'==== 任务 {i}/{len(tasks)} ====')
         try:
             _reconcile_capabilities(task, cfg, device_cap)
-            run_task(task, cfg, ollama_url)
+            run_task(task, cfg, ollama_url, no_wait_audio=args.no_wait_audio)
         except Exception as exc:
             _c('ERR', f'任务异常（{task.get("video_path", "?")}）：{exc}')
 

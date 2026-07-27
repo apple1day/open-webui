@@ -253,8 +253,12 @@ RUN_VIDEO_TASKS=1 ./start-video-analysis.sh
 ./venv/bin/python scripts/video_tasks.py --config docs/json/even-path.json --ollama-url http://localhost:11434
 
 # 删除解析为模糊的视频
-
 ./venv/bin/python scripts/video_tasks.py --config docs/json/even-path.json --ollama-url http://localhost:11434
+
+# 2026-07-27 音频异步
+./venv/bin/python scripts/video_tasks.py --config docs/json/even-path.json \
+    --ollama-url http://localhost:11434 --no-wait-audio
+
 
 cd /Users/even/mine/some 
 mv *.md *.srt /Users/even/mine/my-webui/logs/md
