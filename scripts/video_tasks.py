@@ -128,7 +128,9 @@ DEFAULT_GPU_ENABLED = True  # 是否启用GPU加速（如果可用）
 
 # 并发配置
 DEFAULT_CONCURRENCY = 3     # 默认并发帧分析数（与前端表单、video-tasks.json、后端路由保持一致）
-MAX_CONCURRENCY = 8         # 并发安全上限：避免 Ollama 显存/连接句柄被打爆
+# 并发安全上限：原为 8（按 GPU 显存保守设定）。纯 CPU 推理的大核机器（如 96 核）上
+# 瓶颈是核数而非显存，可通过环境变量 VIDEO_MAX_CONCURRENCY 上调。
+MAX_CONCURRENCY = int(os.getenv('VIDEO_MAX_CONCURRENCY') or 16)
 
 # 笔记模式配置
 DEFAULT_NOTEBOOK_MODE = False  # 是否启用笔记模式（保存截图+结构化笔记）
@@ -1031,7 +1033,25 @@ def ollama_chat(
     message: dict = {'role': 'user', 'content': content}
     if images:
         message['images'] = images
-    payload = {'model': model, 'messages': [message], 'stream': bool(stream), 'options': {'temperature': 0.2}}
+    # 性能相关（可用环境变量调）：
+    # - keep_alive：让模型常驻内存，避免每次请求反复加载/卸载。本机内存充足(246G)，
+    #   视觉模型 ~5.5G 常驻收益极大；纯 CPU 推理下模型加载耗时尤其明显。
+    # - num_thread：单请求使用的推理线程数。并发 N 路时建议 N*num_thread ≲ 物理核数，
+    #   否则多路互相抢核反而更慢；留空则交给 Ollama 自行决定。
+    _opts: dict = {'temperature': 0.2}
+    _nthread = os.getenv('OLLAMA_NUM_THREAD')
+    if _nthread:
+        try:
+            _opts['num_thread'] = int(_nthread)
+        except ValueError:
+            pass
+    payload = {
+        'model': model,
+        'messages': [message],
+        'stream': bool(stream),
+        'options': _opts,
+        'keep_alive': os.getenv('OLLAMA_KEEP_ALIVE') or '30m',
+    }
     req = urllib.request.Request(
         f'{ollama_url.rstrip("/")}/api/chat',
         data=json.dumps(payload).encode('utf-8'),
@@ -1384,18 +1404,37 @@ def transcribe_audio(video_path: str, whisper_model: str, language: Optional[str
     with _WHISPER_LOCK:
         model = _WHISPER_CACHE.get(whisper_model)
         if model is None:
-            _c('INFO', f'加载 Whisper 模型「{whisper_model}」(首次会下载/初始化, CPU int8)…')
+            # CPU 调优说明（本机 96 逻辑核 / 无 GPU）：
+            # - cpu_threads 并非越大越好：CTranslate2 超过 ~16 线程后调度开销会吃掉收益，
+            #   且多个 ASR 子进程并行时各开满核会严重争抢。默认 16，可用环境变量覆盖。
+            # - num_workers>1 让多个音频块并行解码，配合大内存很划算。
+            _threads = int(os.getenv('WHISPER_CPU_THREADS') or 16)
+            _workers = int(os.getenv('WHISPER_NUM_WORKERS') or 2)
+            _ctype = os.getenv('WHISPER_COMPUTE_TYPE') or 'int8'
+            _c('INFO', f'加载 Whisper 模型「{whisper_model}」'
+                       f'(CPU {_ctype}, threads={_threads}, workers={_workers})…')
             try:
-                # cpu_threads 默认只有 4，这里用满物理核心数以提升 CPU 利用率
-                model = WhisperModel(whisper_model, device='cpu', compute_type='int8',
-                                     cpu_threads=max(4, os.cpu_count() or 4))
+                model = WhisperModel(whisper_model, device='cpu', compute_type=_ctype,
+                                     cpu_threads=max(1, _threads), num_workers=max(1, _workers))
             except Exception as exc:
                 _c('WARN', f'加载 Whisper 失败，跳过音频：{exc}')
                 return '', []
             _WHISPER_CACHE[whisper_model] = model
 
     try:
-        segments, _info = model.transcribe(video_path, beam_size=5, language=language or None)
+        # 加速关键项：
+        # - vad_filter=True 先用 VAD 切掉静音/无人声段，长视频常见 30%~60% 提速，且减少幻听重复
+        # - beam_size 默认降到 1（贪心解码）：CPU 下比 beam=5 快约 2~3 倍，中文可懂度损失很小；
+        #   需要更高精度时设 WHISPER_BEAM_SIZE=5 找回原行为
+        _beam = int(os.getenv('WHISPER_BEAM_SIZE') or 1)
+        segments, _info = model.transcribe(
+            video_path,
+            beam_size=max(1, _beam),
+            language=language or None,
+            vad_filter=(os.getenv('WHISPER_VAD', '1') != '0'),
+            vad_parameters={'min_silence_duration_ms': 500},
+            condition_on_previous_text=False,
+        )
         seg_list = [(float(s.start), float(s.end), (s.text or '').strip()) for s in segments]
     except Exception as exc:
         _c('WARN', f'音频转写失败（可能无音轨）：{exc}')
@@ -2075,6 +2114,12 @@ def run_task(task: dict, defaults: dict, ollama_url: str,
     save_report = task.get('save_report', True)
     custom_prompt = task.get('prompt')
     include_audio = bool(task.get('include_audio', defaults.get('include_audio', False)))
+    # --no-audio / force_no_audio：全局强制关闭，优先级高于 task 与全局配置，
+    # 用于「只要画面分析」的最快路径（Whisper 在纯 CPU 下往往是单视频最大耗时项）。
+    if defaults.get('force_no_audio'):
+        if include_audio:
+            _c('INFO', '已按 --no-audio 跳过音频转写（忽略配置中的 include_audio=true）')
+        include_audio = False
     whisper_model = task.get('whisper_model') or defaults.get('whisper_model') or DEFAULT_WHISPER_MODEL
     whisper_language = task.get('whisper_language') or defaults.get('whisper_language')
     # 报告/字幕输出目录：留空＝写到视频同目录（旧行为）；填了就写到该目录（自动创建）。
@@ -2740,6 +2785,9 @@ def main() -> int:
     parser.add_argument('--no-wait-audio', action='store_true',
                         help='音频转写完全脱离主流程：不等待、直接写报告，'
                              '转写由独立子进程在后台跑完后再把音频章节补全（默认仍等待以保证报告完整）')
+    parser.add_argument('--no-audio', action='store_true',
+                        help='强制关闭音频转写：无视配置文件里各 task 的 include_audio=true，'
+                             '直接跳过最耗时的 Whisper 环节（只要画面分析时用这个最快）')
     # 隐藏子命令：被 run_asr_detached 调用，只做音频转写，不对外暴露
     parser.add_argument('--_asr-worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--video-path', default='', help=argparse.SUPPRESS)
@@ -2802,6 +2850,11 @@ def main() -> int:
     _c('INFO', f'运行日志将写入：{log_file}')
 
     ollama_url = args.ollama_url or cfg.get('ollama_url') or os.getenv('OLLAMA_BASE_URL') or 'http://localhost:11434'
+
+    # --no-audio：写进 cfg（= run_task 的 defaults），由 run_task 内部强制覆盖各 task 的 include_audio
+    if args.no_audio:
+        cfg['force_no_audio'] = True
+        _c('INFO', '--no-audio 已启用：本次运行将跳过所有音频转写')
 
     # 任务来源：--video-dir 优先（扫描整目录），否则用配置里的 tasks。
     if args.video_dir:

@@ -1,0 +1,56 @@
+{
+    "_comment": "本机(Linux, 96核 AMD EPYC / 246G 内存 / 无 GPU)调优配置。与 even-path.json 的差异：路径改为本机、summary_model 改为本机已有的 qwen2.5:latest、gpu_enabled=false、并发按核数上调、默认关闭音频。",
+
+    "ollama_url": "http://localhost:11434",
+    "log_file": "logs/video_tasks.log",
+    "default_model": "minicpm-v:latest",
+    "default_summary_model": "qwen2.5:latest",
+    "language": "zh",
+
+    "include_audio": false,
+    "whisper_model": "base",
+    "whisper_language": null,
+
+    "sample_mode": "auto",
+    "min_frames": 20,
+
+    "concurrency": 8,
+    "task_workers": 3,
+
+    "cache_enabled": true,
+    "cache_dir": "~/.video_analysis_cache",
+    "gpu_enabled": false,
+    "skip_existing": true,
+
+    "blur_delete_enabled": true,
+    "blur_delete_threshold": 100.0,
+    "blur_delete_skip": true,
+    "blur_delete_log": "logs/delete.log",
+    "blur_delete_script": "logs/delete.sh",
+
+    "tasks": [
+        {
+            "video_dir": "/data/workspace/data",
+            "recursive": false,
+            "model": "minicpm-v:latest",
+            "summary_model": "qwen2.5:latest",
+            "language": "zh",
+            "sample_mode": "scene",
+            "scene_enhanced": true,
+            "max_frames": 30,
+            "min_frames": 20,
+            "include_audio": false,
+            "whisper_model": "base",
+            "save_report": true,
+            "output_dir": "/data/workspace/my-webui/logs/md",
+            "concurrency": 8,
+            "cache_enabled": true,
+            "dedup_enabled": true,
+            "dedup_threshold": 10,
+            "quality_filter_enabled": true,
+            "quality_blur_threshold": 100.0,
+            "quality_dark_threshold": 30.0,
+            "quality_bright_threshold": 225.0
+        }
+    ]
+}
