@@ -95,8 +95,20 @@ else
     DATABASE_URL="$(grep -E '^[[:space:]]*DATABASE_URL=' "$SCRIPT_DIR/.env" | head -1 | cut -d= -f2- | sed -E "s/^[[:space:]]*['\"]|['\"]$//g")"
   fi
   DATABASE_URL="${DATABASE_URL:-mysql+aiomysql://root:123456@127.0.0.1:3306/webui}"
+  # 探测 MySQL 端口是否可达；不可达（如容器内无 MySQL 或被权限限制）则自动回退 SQLite，
+  # 避免脚本因缺库直接失败。有 MySQL 的环境行为不变。
+  if ! (exec 3<>/dev/tcp/127.0.0.1/3306) 2>/dev/null; then
+    c_warn "未检测到 MySQL(127.0.0.1:3306)，自动回退 SQLite。"
+    DATABASE_URL="sqlite:///${SCRIPT_DIR}/backend/data/webui.db"
+  else
+    exec 3>&- 2>/dev/null
+  fi
   export DATABASE_URL
-  c_info "数据库: MySQL ($DATABASE_URL)"
+  if [[ "$DATABASE_URL" == sqlite* ]]; then
+    c_info "数据库: SQLite ($DATABASE_URL)"
+  else
+    c_info "数据库: MySQL ($DATABASE_URL)"
+  fi
 fi
 export FRONTEND_BUILD_DIR="$BUILD_DIR"
 export OLLAMA_BASE_URL="$OLLAMA_URL"
